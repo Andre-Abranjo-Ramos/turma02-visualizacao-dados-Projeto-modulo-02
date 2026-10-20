@@ -1,0 +1,15 @@
+# =====================================================================
+# Tema visual do Data App (aplicado localmente e no Streamlit Cloud)
+# Paleta sóbria, de alto contraste, adequada a um painel financeiro
+# executivo (item 4.5: contraste harmônico e carga cognitiva reduzida).
+# =====================================================================
+[theme]
+base                     = "light"
+primaryColor             = "#0B5394"   # azul corporativo (botões, destaques)
+backgroundColor          = "#FFFFFF"   # fundo principal
+secondaryBackgroundColor = "#F1F4F8"   # sidebar e cartões
+textColor                = "#1F2937"   # texto quase preto (boa leitura)
+font                     = "sans serif"
+
+[server]
+runOnSave = true                       # recarrega o app ao salvar no VS Code
