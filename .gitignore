@@ -1,0 +1,33 @@
+# ============================================================
+# .gitignore - Projeto Final Visualização de Dados (Linha 2 B3)
+# Impede o envio de credenciais, ambiente virtual e temporários
+# (itens 4.2, 4.4 e 5.4 do edital)
+# ============================================================
+
+# --- CREDENCIAIS (NUNCA enviar ao GitHub) ---
+.streamlit/secrets.toml
+.env
+*.env
+
+# --- Ambiente virtual Python ---
+.venv/
+venv/
+env/
+
+# --- Cache e compilados do Python ---
+__pycache__/
+*.py[cod]
+
+# --- Jupyter Notebook ---
+.ipynb_checkpoints/
+
+# --- Editor / Sistema operacional ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- Logs e temporários ---
+*.log
+*.tmp
