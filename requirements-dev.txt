@@ -1,0 +1,8 @@
+# =====================================================================
+# Dependências apenas do ambiente LOCAL de desenvolvimento.
+# Instala tudo da aplicação + ferramentas do notebook de EDA.
+# (O Streamlit Cloud lê somente o requirements.txt.)
+# =====================================================================
+-r requirements.txt
+jupyter>=1.0           # notebooks de análise exploratória (EDA)
+ipykernel>=6.29        # permite o VS Code executar o notebook com a .venv

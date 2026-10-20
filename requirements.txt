@@ -1,0 +1,12 @@
+# =====================================================================
+# Dependências da APLICAÇÃO (usadas pelo Streamlit Community Cloud)
+# As versões exatas serão fixadas (==) no card de Deploy, a partir das
+# versões que funcionaram na sua .venv (pip freeze).
+# =====================================================================
+streamlit>=1.40        # framework do Data App (st.connection, st.cache_data, st.tabs)
+pandas>=2.2            # manipulação dos DataFrames (ETL e filtros)
+numpy>=1.26            # cálculos numéricos (raiz de 252, etc.)
+plotly>=5.24           # gráficos interativos (plotly.express)
+yfinance>=0.2.54       # coleta das cotações da B3 (sufixo .SA)
+SQLAlchemy>=2.0        # exigido pelo st.connection(type="sql")
+psycopg2-binary>=2.9   # driver PostgreSQL (Supabase)
