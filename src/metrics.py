@@ -6,7 +6,8 @@ ETAPA 3 DO PIPELINE: cálculo dos INDICADORES FINANCEIROS.
 
 Entrada : data/processed/cotacoes_limpas.csv  (gerado por src/transform.py)
           data/raw/ativos.csv                 (empresa e setor de cada ativo)
-Saída   : data/processed/cotacoes_tratadas.csv
+Saídas  : data/processed/cotacoes_tratadas.csv -> série diária com todos os indicadores
+          data/processed/resumo_ativos.csv     -> uma linha por ativo (risco e retorno)
 
 Como executar (na RAIZ do projeto, com a .venv ativa):
     python -m src.metrics
@@ -17,11 +18,23 @@ um período (ex.: só 2022), a Base 100 e o retorno acumulado precisam ser
 RECALCULADOS a partir do primeiro dia do filtro, e não do início de 2021.
 Uma única implementação garante que pipeline e app mostrem o mesmo número.
 
-Indicadores deste módulo (card 9):
-    retorno_diario     = fechamento_ajustado(t) / fechamento_ajustado(t-1) - 1
-    base_100           = 100 * fechamento_ajustado(t) / fechamento_ajustado(1º dia)
-    retorno_acumulado  = base_100 / 100 - 1
-    volume_financeiro  = fechamento x volume  (estimativa em R$)
+Indicadores DIÁRIOS (uma linha por ativo por pregão):
+    retorno_diario     = fechamento_ajustado(t) / fechamento_ajustado(t-1) - 1   (card 9)
+    base_100           = 100 * fechamento_ajustado(t) / fechamento_ajustado(1º dia) (card 9)
+    retorno_acumulado  = base_100 / 100 - 1                                     (card 9)
+    volume_financeiro  = fechamento x volume  (estimativa em R$)                (card 9)
+    drawdown           = fechamento_ajustado(t) / maior preço até t - 1         (card 10)
+    sma_21, sma_50     = médias móveis simples de 21 e 50 pregões               (card 10)
+
+Indicadores por ATIVO (resumo do período) - card 10:
+    retorno_anualizado   = (1 + retorno_acumulado) ^ (252 / nº de retornos) - 1
+    volatilidade_anual   = desvio-padrão dos retornos diários x raiz(252)
+    sharpe_empirico      = retorno_anualizado / volatilidade_anual   (taxa livre de risco = 0)
+    assimetria (skew)    = < 0: quedas extremas mais frequentes que altas extremas
+    curtose (excesso)    = > 0: "caudas gordas", eventos extremos acima da curva normal
+    drawdown_maximo      = maior queda a partir de um topo anterior
+
+Convenção: 252 pregões por ano (padrão do mercado brasileiro).
 
 Por que o FECHAMENTO AJUSTADO nos retornos: ele incorpora dividendos, JCP e
 desdobramentos. Sem o ajuste, uma ação que pagou dividendo pareceria ter
@@ -36,6 +49,8 @@ from src import config
 
 ARQ_LIMPO = config.DIR_DADOS_TRATADOS / "cotacoes_limpas.csv"
 ARQ_TRATADO = config.DIR_DADOS_TRATADOS / "cotacoes_tratadas.csv"
+ARQ_RESUMO = config.DIR_DADOS_TRATADOS / "resumo_ativos.csv"
+PREGOES_ANO = 252
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +93,73 @@ def calcular_volume_financeiro(df: pd.DataFrame) -> pd.DataFrame:
     """
     volume_fin = (df["fechamento"] * df["volume"]).where(df["ticker"] != config.BENCHMARK)
     return df.assign(volume_financeiro=volume_fin)
+
+
+def calcular_drawdown(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drawdown: quanto o ativo está abaixo do MAIOR preço já atingido até aquele dia.
+    Ex.: topo de R$ 50 e preço atual de R$ 40 -> drawdown = 40/50 - 1 = -20%.
+    Mede a "dor" do investidor que comprou no pior momento (no topo).
+    cummax() = máximo acumulado, calculado dentro de cada ativo.
+    """
+    df = df.sort_values(["ticker", "data"])
+    pico = df.groupby("ticker")["fechamento_ajustado"].cummax()
+    return df.assign(pico_historico=pico, drawdown=df["fechamento_ajustado"] / pico - 1)
+
+
+def calcular_medias_moveis(df: pd.DataFrame, janelas=(21, 50)) -> pd.DataFrame:
+    """
+    Médias móveis simples (SMA) do fechamento ajustado:
+      SMA 21 ~ 1 mês de pregões (tendência de curto prazo)
+      SMA 50 ~ 2,5 meses de pregões (tendência de médio prazo)
+    min_periods = janela: a média só aparece quando há pregões suficientes
+    (os primeiros 20/49 dias ficam vazios, o que é esperado).
+    Usamos o preço AJUSTADO para que pagamentos de dividendos não criem
+    "quedas" artificiais que cruzariam as médias.
+    """
+    df = df.sort_values(["ticker", "data"])
+    grupos = df.groupby("ticker")["fechamento_ajustado"]
+    medias = {f"sma_{j}": grupos.transform(lambda s, j=j: s.rolling(j, min_periods=j).mean())
+              for j in janelas}
+    return df.assign(**medias)
+
+
+def resumo_por_ativo(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Uma linha por ativo com os indicadores de risco e retorno do recorte recebido.
+    Reutilizada pelo app: com um período filtrado, os números são refeitos
+    para aquele período.
+    """
+    linhas = []
+    for (codigo, setor), a in df.sort_values("data").groupby(["codigo", "setor"]):
+        ret = a["retorno_diario"].dropna()
+        n_ret = len(ret)
+        ret_acum = a["fechamento_ajustado"].iloc[-1] / a["fechamento_ajustado"].iloc[0] - 1
+        ret_anual = (1 + ret_acum) ** (PREGOES_ANO / n_ret) - 1 if n_ret else float("nan")
+        vol_anual = ret.std() * PREGOES_ANO ** 0.5
+        dd = a["fechamento_ajustado"] / a["fechamento_ajustado"].cummax() - 1
+        linhas.append({
+            "codigo": codigo,
+            "empresa": a["empresa"].iloc[0],
+            "setor": setor,
+            "data_inicio": a["data"].iloc[0],
+            "data_fim": a["data"].iloc[-1],
+            "pregoes": len(a),
+            "retorno_acumulado": ret_acum,
+            "retorno_anualizado": ret_anual,
+            "volatilidade_anual": vol_anual,
+            "sharpe_empirico": ret_anual / vol_anual if vol_anual else float("nan"),
+            "retorno_diario_medio": ret.mean(),
+            "melhor_dia": ret.max(),
+            "pior_dia": ret.min(),
+            "assimetria": ret.skew(),
+            "curtose": ret.kurt(),
+            "drawdown_maximo": dd.min(),
+            "data_drawdown_maximo": a.loc[dd.idxmin(), "data"],
+            "volume_financeiro_medio": a["volume_financeiro"].mean(),
+            "pregoes_sinteticos": int(a["pregao_sintetico"].sum()),
+        })
+    return pd.DataFrame(linhas).sort_values("sharpe_empirico", ascending=False).reset_index(drop=True)
 
 
 def adicionar_cadastro(df: pd.DataFrame) -> pd.DataFrame:
@@ -128,13 +210,23 @@ def conferir_ativo(df: pd.DataFrame, codigo: str = "WEGE3"):
     if not (ok_base and ok_ret):
         sys.exit("❌ Conferência manual falhou.")
 
+    if "drawdown" in a.columns:
+        i = a["drawdown"].idxmin()
+        pico_manual = a.loc[:i, "fechamento_ajustado"].max()
+        dd_manual = a.loc[i, "fechamento_ajustado"] / pico_manual - 1
+        ok_dd = abs(dd_manual - a.loc[i, "drawdown"]) < 1e-12
+        print(f"  Drawdown máximo = {a.loc[i, 'fechamento_ajustado']:.2f} / {pico_manual:.2f} - 1 = "
+              f"{dd_manual:.2%} em {a.loc[i, 'data']:%d/%m/%Y}  {'✅ confere' if ok_dd else '❌ diverge'}")
+        if not ok_dd:
+            sys.exit("❌ Conferência manual do drawdown falhou.")
+
 
 # ---------------------------------------------------------------------------
 # EXECUÇÃO
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("INDICADORES: RETORNO DIÁRIO, BASE 100 E VOLUME FINANCEIRO (card 9)")
+    print("INDICADORES FINANCEIROS: RETORNO, RISCO E TENDÊNCIA (cards 9 e 10)")
     print("=" * 70)
     if not ARQ_LIMPO.exists():
         sys.exit("❌ Base limpa não encontrada. Rode antes: python -m src.transform")
@@ -145,6 +237,8 @@ def main():
     df = calcular_retorno_diario(df)
     df = calcular_base_100(df)
     df = calcular_volume_financeiro(df)
+    df = calcular_drawdown(df)
+    df = calcular_medias_moveis(df)
     df = adicionar_cadastro(df)
     df = df.sort_values(["ticker", "data"]).reset_index(drop=True)
 
@@ -153,13 +247,25 @@ def main():
 
     conferir_ativo(df, "WEGE3")
 
-    print("\nRetorno acumulado no período (Base 100):")
-    print(resumo_retorno(df).to_string(index=False))
+    resumo = resumo_por_ativo(df)
+    vista = resumo.assign(
+        ret_acum=(resumo["retorno_acumulado"] * 100).round(1),
+        ret_anual=(resumo["retorno_anualizado"] * 100).round(1),
+        vol_anual=(resumo["volatilidade_anual"] * 100).round(1),
+        sharpe=resumo["sharpe_empirico"].round(2),
+        assim=resumo["assimetria"].round(2),
+        curt=resumo["curtose"].round(1),
+        dd_max=(resumo["drawdown_maximo"] * 100).round(1),
+    )[["codigo", "setor", "ret_acum", "ret_anual", "vol_anual", "sharpe", "assim", "curt", "dd_max"]]
+    print("\nResumo por ativo (% e índices), ordenado pelo Sharpe empírico:")
+    print(vista.to_string(index=False))
 
     df.to_csv(ARQ_TRATADO, index=False, encoding="utf-8", date_format="%Y-%m-%d")
+    resumo.to_csv(ARQ_RESUMO, index=False, encoding="utf-8", date_format="%Y-%m-%d")
     print("-" * 70)
-    print(f"✅ Base com indicadores: {ARQ_TRATADO.relative_to(config.RAIZ)}  "
+    print(f"✅ Série diária : {ARQ_TRATADO.relative_to(config.RAIZ)}  "
           f"({len(df):,} linhas x {df.shape[1]} colunas)")
+    print(f"✅ Resumo       : {ARQ_RESUMO.relative_to(config.RAIZ)}  ({len(resumo)} ativos)")
     print("=" * 70)
 
 
