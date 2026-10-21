@@ -15,14 +15,21 @@ Princípio: TODA verificação é executada e registrada, mesmo quando não enco
 problema. Assim o tratamento fica comprovado (item 4.3 do edital), e não
 apenas presumido.
 
-Etapas deste módulo (card 7):
-    1. Leitura com controle de ENCODING
-    2. PADRONIZAÇÃO dos nomes de colunas (português, snake_case)
-    3. Conversão de TIPOS (preços -> float, volume -> int, textos -> string)
-    4. Remoção de DUPLICADOS por (ticker, data)
-    5. Tratamento de NULOS com regra documentada
-    6. Verificações de CONSISTÊNCIA FINANCEIRA (preço <= 0, máxima < mínima,
-       fechamento fora da faixa do dia, volume zerado)
+Etapas deste módulo (na ordem de execução):
+    1. Leitura com controle de ENCODING                              (card 7)
+    2. PADRONIZAÇÃO dos nomes de colunas (português, snake_case)     (card 7)
+    3. Conversão de TIPOS (preços -> float, volume -> int, textos)   (card 7)
+    4. Conversão de DATAS para datetime, sem fuso horário            (card 8)
+    5. Remoção de DUPLICADOS por (ticker, data)                      (card 7)
+    6. Tratamento de NULOS com regra documentada                     (card 7)
+    7. Verificações de CONSISTÊNCIA FINANCEIRA (OHLC e volume)       (card 7)
+    8. Validação do PERÍODO obrigatório 01/01/2021 a 31/12/2023      (card 8)
+    9. Validação do CALENDÁRIO de pregões entre os ativos            (card 8)
+   10. Marcação de PREGÕES SINTÉTICOS da fonte                       (card 8)
+
+Por que as datas são convertidas ANTES de remover duplicados: "2021-01-04" e
+"2021-01-04 00:00:00" são textos diferentes para o mesmo dia. Só depois de
+convertidas para datetime a chave (ticker, data) identifica duplicados de fato.
 
 Observação pandas 3.0: evitamos atribuição encadeada (df[a][b] = x) e
 operações inplace; cada etapa recebe um DataFrame e devolve um novo.
@@ -220,27 +227,126 @@ def verificar_consistencia(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# 4. DATAS (card 8)
+# ---------------------------------------------------------------------------
+def padronizar_datas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Converte 'data' de texto para datetime64, removendo fuso horário e horário.
+      - format="ISO8601": aceita variações do padrão ISO na mesma coluna
+        ("2021-01-04", "2021-01-04 00:00:00", "2021-01-04T00:00:00-03:00");
+      - utc=True + tz_localize(None): unifica datas com e sem fuso e remove o fuso;
+      - errors="coerce": datas realmente ilegíveis viram NaT e são removidas;
+      - normalize(): zera o horário, deixando só o dia do pregão.
+    """
+    datas = pd.to_datetime(df["data"], errors="coerce", format="ISO8601", utc=True)
+    datas = datas.dt.tz_localize(None).dt.normalize()
+
+    invalidas = int(datas.isna().sum())
+    df = df.assign(data=datas).loc[datas.notna()]
+    registrar("datas", "Datas ilegíveis ou vazias", invalidas,
+              "removidas" if invalidas else "todas convertidas para datetime64 (sem fuso horário)")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 8. PERÍODO OBRIGATÓRIO (card 8)
+# ---------------------------------------------------------------------------
+def validar_periodo(df: pd.DataFrame) -> pd.DataFrame:
+    """Mantém somente o recorte do edital: 01/01/2021 a 31/12/2023."""
+    inicio = pd.Timestamp(config.DATA_INICIO)
+    fim = pd.Timestamp(config.DATA_FIM)
+    fora = (df["data"] < inicio) | (df["data"] > fim)
+    registrar("periodo", f"Linhas fora de {inicio:%d/%m/%Y} a {fim:%d/%m/%Y}", int(fora.sum()),
+              "removidas" if fora.any() else "todas dentro do período")
+    df = df.loc[~fora]
+    registrar("periodo", "Primeiro e último pregão da base", 0,
+              f"{df['data'].min():%d/%m/%Y} a {df['data'].max():%d/%m/%Y}")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 9. CALENDÁRIO DE PREGÕES (card 8)
+# ---------------------------------------------------------------------------
+def validar_calendario(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Comparações entre ativos (Base 100, correlação) exigem que todos tenham
+    cotação nos MESMOS dias. Verifica:
+      - pregões em fim de semana (não existem na B3);
+      - quantidade de pregões por ativo;
+      - datas em que algum ativo está ausente.
+    """
+    fim_semana = df["data"].dt.dayofweek >= 5
+    registrar("calendario", "Pregões em sábado ou domingo", int(fim_semana.sum()),
+              "removidos" if fim_semana.any() else "ok")
+    df = df.loc[~fim_semana]
+
+    por_ativo = df.groupby("ticker")["data"].nunique()
+    registrar("calendario", "Pregões por ativo (mínimo e máximo)", int(por_ativo.max() - por_ativo.min()),
+              f"mín. {por_ativo.min()} / máx. {por_ativo.max()} pregões por ativo")
+
+    n_ativos = df["ticker"].nunique()
+    ativos_por_dia = df.groupby("data")["ticker"].nunique()
+    incompletos = int((ativos_por_dia < n_ativos).sum())
+    registrar("calendario", f"Datas sem cotação de todos os {n_ativos} ativos", incompletos,
+              "registradas; comparações usam apenas datas comuns" if incompletos else
+              f"calendário idêntico: {ativos_por_dia.size} pregões para todos os ativos")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 10. PREGÕES SINTÉTICOS DA FONTE (card 8)
+# ---------------------------------------------------------------------------
+def marcar_pregoes_sinteticos(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    O Yahoo Finance às vezes preenche um dia sem dado repetindo o último preço:
+    abertura = máxima = mínima = fechamento = fechamento anterior, e volume 0.
+    Em ações líquidas isso não é um pregão real.
+
+    Decisão: NÃO apagar (desalinharia o calendário entre os ativos) e NÃO
+    inventar preço. A linha é MARCADA em 'pregao_sintetico' e documentada como
+    limitação. Efeito: retorno de 0% naquele dia; o dia seguinte absorve a
+    variação de dois pregões. Retorno acumulado e Base 100 não são afetados.
+    """
+    df = df.sort_values(["ticker", "data"])
+    fechamento_anterior = df.groupby("ticker")["fechamento"].shift(1)
+    precos_iguais = ((df["maxima"] - df["minima"]).abs() <= TOLERANCIA) & \
+                    ((df["abertura"] - df["fechamento"]).abs() <= TOLERANCIA) & \
+                    ((df["fechamento"] - fechamento_anterior).abs() <= TOLERANCIA)
+    sintetico = (df["ticker"] != config.BENCHMARK) & (df["volume"] == 0) & precos_iguais
+
+    df = df.assign(pregao_sintetico=sintetico.astype("bool"))
+    detalhes = ", ".join(f"{r.codigo} {r.data:%d/%m/%Y}" for r in df.loc[sintetico].itertuples())
+    registrar("fonte", "Pregões sintéticos (preço repetido e volume zero)", int(sintetico.sum()),
+              f"marcados em 'pregao_sintetico' e mantidos: {detalhes}" if detalhes else "nenhum")
+    return df
+
+
+# ---------------------------------------------------------------------------
 # EXECUÇÃO
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("LIMPEZA E PADRONIZAÇÃO DA BASE (card 7)")
+    print("LIMPEZA, PADRONIZAÇÃO E VALIDAÇÃO DA BASE (cards 7 e 8)")
     print("=" * 70)
 
     df = carregar_bruto()
     linhas_iniciais = len(df)
     df = padronizar_colunas(df)
     df = converter_tipos(df)
+    df = padronizar_datas(df)          # antes dos duplicados (ver docstring)
     df = remover_duplicados(df)
     df = tratar_nulos(df)
     df = verificar_consistencia(df)
+    df = validar_periodo(df)
+    df = validar_calendario(df)
+    df = marcar_pregoes_sinteticos(df)
     df = df.sort_values(["ticker", "data"]).reset_index(drop=True)
 
     registrar("resumo", "Linhas removidas no total", linhas_iniciais - len(df),
               f"{linhas_iniciais:,} -> {len(df):,} linhas")
 
     config.DIR_DADOS_TRATADOS.mkdir(parents=True, exist_ok=True)
-    df.to_csv(ARQ_LIMPO, index=False, encoding="utf-8")
+    df.to_csv(ARQ_LIMPO, index=False, encoding="utf-8", date_format="%Y-%m-%d")
     pd.DataFrame(registros).to_csv(ARQ_RELATORIO, index=False, encoding="utf-8")
 
     print("-" * 70)
