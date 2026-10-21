@@ -71,6 +71,34 @@ TICKER_NA_FONTE = {
     "EMBR3.SA": "EMBJ3.SA",
 }
 
+# ---------------------------------------------------------------------------
+# EVENTOS SOCIETÁRIOS NÃO REFLETIDOS PELA FONTE
+# O "Adj Close" do Yahoo ajusta dividendos e desdobramentos, mas NÃO ajustou a
+# cisão da participação do Itaú na XP: em 04/10/2021 o ITUB4 "caiu" ~18% porque
+# o acionista passou a receber BDRs da XP (XPBR31) - o valor foi preservado,
+# apenas dividido em dois papéis. Sem ajuste, o retorno do ITUB4 fica
+# subestimado e a volatilidade/curtose ficam infladas.
+#
+# Método (o mesmo das bolsas para proventos):
+#   valor distribuído por ação (D) = preço do BDR XPBR31 no 1º pregão / 43,3128323
+#   fator = 1 - D / preço nominal do ITUB4 no último pregão "com direito"
+#   preços AJUSTADOS anteriores à data-ex são multiplicados pelo fator.
+# Fontes: fatos relevantes Itaú Unibanco/XPart (2021); relação de troca de
+# 43,3128323 ações XPart por BDR; data de corte 01/10/2021 e início da
+# negociação dos BDRs em 04/10/2021.
+# ---------------------------------------------------------------------------
+EVENTOS_SOCIETARIOS = [
+    {
+        "ticker": "ITUB4.SA",
+        "tipo": "cisão",
+        "descricao": "Cisão da participação na XP (XPart): acionistas receberam BDRs XPBR31",
+        "data_ex": "2021-10-04",              # 1º pregão sem direito
+        "ativo_recebido": "XPBR31.SA",
+        "acoes_por_unidade_recebida": 43.3128323,
+    },
+]
+ARQ_EVENTOS = DIR_DADOS_BRUTOS / "eventos_societarios.csv"
+
 # Benchmark (referência de mercado). NÃO faz parte da carteira de 12 ativos;
 # é usado apenas para os deltas dos KPIs (ex.: carteira x Ibovespa).
 BENCHMARK = "^BVSP"

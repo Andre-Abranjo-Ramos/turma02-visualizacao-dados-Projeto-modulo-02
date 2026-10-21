@@ -26,6 +26,7 @@ Etapas deste módulo (na ordem de execução):
     8. Validação do PERÍODO obrigatório 01/01/2021 a 31/12/2023      (card 8)
     9. Validação do CALENDÁRIO de pregões entre os ativos            (card 8)
    10. Marcação de PREGÕES SINTÉTICOS da fonte                       (card 8)
+   11. Ajuste de EVENTOS SOCIETÁRIOS não refletidos pela fonte       (card extra)
 
 Por que as datas são convertidas ANTES de remover duplicados: "2021-01-04" e
 "2021-01-04 00:00:00" são textos diferentes para o mesmo dia. Só depois de
@@ -322,11 +323,53 @@ def marcar_pregoes_sinteticos(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# 11. EVENTOS SOCIETÁRIOS (card extra - cisão XP/ITUB4)
+# ---------------------------------------------------------------------------
+def ajustar_eventos_societarios(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aplica os fatores calculados por src/eventos.py ao FECHAMENTO AJUSTADO dos
+    pregões anteriores à data-ex (método multiplicativo das bolsas).
+
+    Só o fechamento_ajustado muda: abertura, máxima, mínima e fechamento
+    continuam como negociados, preservando o histórico real de preços.
+    A coluna 'fator_evento' registra o multiplicador aplicado (1,0 = nenhum).
+    """
+    df = df.assign(fator_evento=1.0)
+    if not config.EVENTOS_SOCIETARIOS:
+        registrar("eventos", "Eventos societários configurados", 0, "nenhum")
+        return df
+    if not config.ARQ_EVENTOS.exists():
+        sys.exit("❌ Fatores de eventos não encontrados. Rode antes: python -m src.eventos")
+
+    def retorno_no_dia(base, ticker, dia):
+        """Retorno do fechamento ajustado no 'dia' em relação ao pregão anterior."""
+        serie = base.loc[base["ticker"] == ticker].sort_values("data").set_index("data")["fechamento_ajustado"]
+        return float(serie.pct_change().get(dia, float("nan")))
+
+    eventos = pd.read_csv(config.ARQ_EVENTOS, encoding="utf-8", parse_dates=["data_ex"])
+    for ev in eventos.itertuples():
+        ret_antes = retorno_no_dia(df, ev.ticker, ev.data_ex)
+        alvo = (df["ticker"] == ev.ticker) & (df["data"] < ev.data_ex)
+        df.loc[alvo, "fechamento_ajustado"] = df.loc[alvo, "fechamento_ajustado"] * ev.fator_ajuste
+        df.loc[alvo, "fator_evento"] = df.loc[alvo, "fator_evento"] * ev.fator_ajuste
+        registrar("eventos", f"{ev.tipo.capitalize()} {ev.ticker.replace('.SA', '')} em {ev.data_ex:%d/%m/%Y}",
+                  int(alvo.sum()),
+                  f"fechamento ajustado anterior multiplicado por {ev.fator_ajuste:.6f} "
+                  f"({1 - ev.fator_ajuste:.2%} distribuído em {ev.ativo_recebido.replace('.SA', '')})")
+        # Prova do ajuste: o "tombo" da data-ex deve virar um movimento normal de mercado
+        ret_depois = retorno_no_dia(df, ev.ticker, ev.data_ex)
+        ret_ibov = retorno_no_dia(df, config.BENCHMARK, ev.data_ex)
+        registrar("eventos", f"Retorno de {ev.ticker.replace('.SA', '')} em {ev.data_ex:%d/%m/%Y} (prova do ajuste)", 0,
+                  f"antes {ret_antes:.2%} -> depois {ret_depois:.2%} (Ibovespa no dia: {ret_ibov:.2%})")
+    return df
+
+
+# ---------------------------------------------------------------------------
 # EXECUÇÃO
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("LIMPEZA, PADRONIZAÇÃO E VALIDAÇÃO DA BASE (cards 7 e 8)")
+    print("LIMPEZA, PADRONIZAÇÃO E VALIDAÇÃO DA BASE (cards 7, 8 e evento societário)")
     print("=" * 70)
 
     df = carregar_bruto()
@@ -340,6 +383,7 @@ def main():
     df = validar_periodo(df)
     df = validar_calendario(df)
     df = marcar_pregoes_sinteticos(df)
+    df = ajustar_eventos_societarios(df)
     df = df.sort_values(["ticker", "data"]).reset_index(drop=True)
 
     registrar("resumo", "Linhas removidas no total", linhas_iniciais - len(df),

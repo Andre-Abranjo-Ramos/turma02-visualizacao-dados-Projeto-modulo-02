@@ -17,4 +17,6 @@ calendario,Pregões em sábado ou domingo,0,ok
 calendario,Pregões por ativo (mínimo e máximo),0,mín. 745 / máx. 745 pregões por ativo
 calendario,Datas sem cotação de todos os 13 ativos,0,calendário idêntico: 745 pregões para todos os ativos
 fonte,Pregões sintéticos (preço repetido e volume zero),3,"marcados em 'pregao_sintetico' e mantidos: BBDC4 02/06/2023, PRIO3 26/09/2022, WEGE3 26/09/2022"
+eventos,Cisão ITUB4 em 04/10/2021,187,fechamento ajustado anterior multiplicado por 0.825849 (17.42% distribuído em XPBR31)
+eventos,Retorno de ITUB4 em 04/10/2021 (prova do ajuste),0,antes -17.96% -> depois -0.66% (Ibovespa no dia: -2.22%)
 resumo,Linhas removidas no total,0,"9,685 -> 9,685 linhas"
