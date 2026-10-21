@@ -1,0 +1,13 @@
+etapa,verificacao,ocorrencias,acao
+encoding,Leitura em UTF-8,0,arquivo lido sem erro de encoding
+padronizacao,Colunas renomeadas para português (snake_case),0,9 colunas padronizadas + coluna 'codigo'
+tipos,Valores não numéricos em preços/volume,0,convertidos para float64 (preços); inválidos viram nulos tratados adiante
+duplicados,"Linhas repetidas por (ticker, data)",0,nenhuma remoção necessária
+nulos,Preços nulos,0,nenhum tratamento necessário
+nulos,Volumes nulos,0,nenhum tratamento necessário
+nulos,Linhas ainda sem preço ajustado após o preenchimento,0,nenhuma remoção necessária
+consistencia,Preços menores ou iguais a zero,0,nenhuma remoção necessária
+consistencia,Máxima menor que a mínima,0,ok
+consistencia,Abertura/fechamento fora da faixa mínima-máxima,0,ok
+consistencia,Pregões com volume zero (ações),3,registrado; mantidos (preço válido)
+resumo,Linhas removidas no total,0,"9,685 -> 9,685 linhas"
