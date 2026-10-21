@@ -1,132 +1,139 @@
 # -*- coding: utf-8 -*-
 """
-app.py - SMOKE TEST (card 5)
-============================
-App mínimo e TEMPORÁRIO para validar o ambiente do Streamlit Community Cloud
-ANTES de construir o Data App definitivo.
+app.py - Data App: Performance de Ações na B3 (2021-2023)
+=========================================================
+Projeto Final - Visualização de Dados e BI | Linha 2 (Mercado de Ações B3)
+Autor: André Abranjo Ramos
 
-O que ele verifica:
-  1. Versão do Python na nuvem x versão local (3.14.6);
-  2. Versões instaladas de cada biblioteca do requirements.txt;
-  3. Se todas as bibliotecas importam sem erro;
-  4. (Opcional, por botão) se o yfinance consegue baixar dados a partir da nuvem.
+Como executar localmente (na raiz do projeto, com a .venv ativa):
+    streamlit run app.py
 
-Este arquivo será SUBSTITUÍDO pelo app definitivo no card
-"Streamlit - conexão resiliente (PostgreSQL + contingência CSV)".
+Arquitetura (o app NÃO recalcula o pipeline; ele consome a base tratada):
+    Supabase (PostgreSQL) --view vw_cotacoes--> app.py
+            \\-- se indisponível --> data/processed/cotacoes_tratadas.csv (contingência)
+
+Construção incremental, um card do Trello por camada:
+    [x] Conexão resiliente (PostgreSQL + contingência CSV)
+    [ ] Cache com @st.cache_data
+    [ ] Filtros na sidebar com session_state e reset
+    [ ] KPIs com st.metric
+    [ ] Abas analíticas (Base 100, Risco x Retorno, Distribuição, Drawdown, Médias Móveis)
+    [ ] Aba de dados, metodologia e download
 """
 
-import platform
-import sys
-from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 # ---------------------------------------------------------------------------
-# Configuração da página (precisa ser o primeiro comando Streamlit)
+# CONFIGURAÇÃO DA PÁGINA (precisa ser o primeiro comando Streamlit)
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Smoke Test - Projeto B3", page_icon="🧪", layout="centered")
+st.set_page_config(
+    page_title="Performance B3 | 2021-2023",
+    page_icon="📈",
+    layout="wide",
+)
 
-st.title("🧪 Smoke Test do Ambiente")
-st.caption("Validação antecipada do Streamlit Community Cloud - Projeto Final Linha 2 (B3)")
+# Caminho relativo à pasta do app (funciona local e no Streamlit Cloud)
+RAIZ = Path(__file__).resolve().parent
+ARQ_CONTINGENCIA = RAIZ / "data" / "processed" / "cotacoes_tratadas.csv"
+
+CONSULTA_SQL = "SELECT * FROM vw_cotacoes ORDER BY ticker, data"
+
+# Colunas que o app precisa, venham do banco ou do CSV
+COLUNAS_OBRIGATORIAS = [
+    "data", "ticker", "codigo", "empresa", "setor", "fechamento", "fechamento_ajustado",
+    "volume", "volume_financeiro", "retorno_diario", "base_100", "retorno_acumulado",
+    "drawdown", "sma_21", "sma_50", "pregao_sintetico",
+]
+
 
 # ---------------------------------------------------------------------------
-# 1) Versão do Python
+# CAMADA DE DADOS: CONEXÃO RESILIENTE
 # ---------------------------------------------------------------------------
-PYTHON_LOCAL = "3.14.6"                      # versão validada no computador do aluno
-python_nuvem = platform.python_version()     # versão em que este app está rodando
+def ler_do_banco() -> pd.DataFrame:
+    """
+    Lê a view vw_cotacoes do Supabase via st.connection.
 
-st.subheader("1. Versão do Python")
-col1, col2 = st.columns(2)
-col1.metric("Ambiente atual", python_nuvem)
-col2.metric("Ambiente local (referência)", PYTHON_LOCAL)
+    - As credenciais vêm de .streamlit/secrets.toml (local) ou do painel
+      Secrets (Streamlit Cloud); nunca do código.
+    - connect_timeout=5: o conn.query do Streamlit faz até 3 tentativas; com
+      5 s cada, no pior caso (banco fora do ar) o app desiste em ~15 s e segue
+      para a contingência, em vez de ficar travado.
+    - driver="psycopg2": a partir do SQLAlchemy 2.1 o driver padrão do
+      PostgreSQL passou a ser o "psycopg" (versão 3). Informamos o driver
+      instalado pelo requirements.txt (psycopg2-binary) explicitamente.
+    - pool_pre_ping=True: testa a conexão antes de usar (evita conexões mortas).
+    - ttl=0 no query: o cache próprio do st.connection fica desligado aqui;
+      o controle de cache será feito por @st.cache_data no card de cache.
+    """
+    conn = st.connection(
+        "postgresql",
+        type="sql",
+        driver="psycopg2",
+        connect_args={"connect_timeout": 5},
+        pool_pre_ping=True,
+    )
+    return conn.query(CONSULTA_SQL, ttl=0)
 
-if python_nuvem == PYTHON_LOCAL:
-    st.success("✅ Python idêntico ao ambiente local.")
-elif python_nuvem.split(".")[:2] == PYTHON_LOCAL.split(".")[:2]:
-    st.info("ℹ️ Mesma versão principal (3.14); diferença só no patch. Compatível.")
+
+def ler_contingencia() -> pd.DataFrame:
+    """Lê o CSV tratado versionado no repositório (mesmas colunas da view)."""
+    return pd.read_csv(ARQ_CONTINGENCIA, encoding="utf-8")
+
+
+def padronizar(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Garante os mesmos tipos e colunas, qualquer que seja a origem:
+    o banco devolve 'data' como date e o CSV como texto.
+    """
+    faltando = [c for c in COLUNAS_OBRIGATORIAS if c not in df.columns]
+    if faltando:
+        raise ValueError(f"Colunas ausentes na base: {faltando}")
+    df = df.assign(data=pd.to_datetime(df["data"]))
+    df = df.assign(ano=df["data"].dt.year, ano_mes=df["data"].dt.strftime("%Y-%m"))
+    return df.sort_values(["ticker", "data"]).reset_index(drop=True)
+
+
+def carregar_dados() -> tuple[pd.DataFrame, str, str]:
+    """
+    Tenta o banco; em QUALQUER falha (rede, senha, banco pausado, secrets
+    ausente), usa o CSV de contingência. Devolve (dados, origem, detalhe).
+    """
+    try:
+        return padronizar(ler_do_banco()), "banco", "Supabase (PostgreSQL) · view vw_cotacoes"
+    except Exception as erro:  # a causa é exibida ao usuário, sem dados sensíveis
+        motivo = type(erro).__name__
+        return padronizar(ler_contingencia()), "csv", f"CSV local de contingência (motivo: {motivo})"
+
+
+# ---------------------------------------------------------------------------
+# INTERFACE
+# ---------------------------------------------------------------------------
+st.title("📈 Performance de Ações na B3 · 2021–2023")
+st.caption("12 ações de 4 setores + Ibovespa · cotações diárias ajustadas · "
+           "Projeto Final de Visualização de Dados e BI (Linha 2)")
+
+try:
+    with st.spinner("Carregando cotações..."):
+        dados, origem, detalhe = carregar_dados()
+except Exception as erro:
+    st.error(f"Não foi possível carregar os dados nem do banco nem do CSV: {type(erro).__name__}")
+    st.stop()
+
+# Status da fonte de dados (heurística de Nielsen: visibilidade do estado do sistema)
+if origem == "banco":
+    st.success(f"🟢 Dados carregados do banco: {detalhe}")
 else:
-    st.warning("⚠️ Versão diferente da local. Anote e avise para ajustarmos.")
+    st.warning(f"🟠 Banco indisponível. Exibindo dados do {detalhe}. "
+               "Os números são os mesmos; apenas a origem mudou.")
 
-st.code(f"{sys.version}\nSistema: {platform.system()} {platform.release()}", language="text")
+c1, c2, c3 = st.columns(3)
+c1.write(f"**Registros:** {len(dados):,}".replace(",", "."))
+c2.write(f"**Ativos:** {dados['codigo'].nunique()} (12 ações + Ibovespa)")
+c3.write(f"**Período:** {dados['data'].min():%d/%m/%Y} a {dados['data'].max():%d/%m/%Y}")
 
-# ---------------------------------------------------------------------------
-# 2) Versões das bibliotecas
-#    Usamos importlib.metadata, que lê a versão instalada sem precisar
-#    importar a biblioteca inteira.
-# ---------------------------------------------------------------------------
-ESPERADAS = {                 # mesmas versões fixadas no requirements.txt
-    "streamlit": "1.66.0",
-    "pandas": "3.0.6",
-    "numpy": "2.5.4",
-    "plotly": "7.1.0",
-    "yfinance": "1.7.0",
-    "SQLAlchemy": "2.1.5",
-    "psycopg2-binary": "2.9.13",
-}
-# Dependências internas do servidor do Streamlit (só para diagnóstico)
-DIAGNOSTICO = ["starlette", "tornado"]
+st.dataframe(dados.head(15), width="stretch", hide_index=True)
 
-def versao_instalada(pacote: str) -> str:
-    """Retorna a versão instalada do pacote, ou 'não instalado'."""
-    try:
-        return version(pacote)
-    except PackageNotFoundError:
-        return "não instalado"
-
-st.subheader("2. Bibliotecas do requirements.txt")
-linhas = []
-for pacote, esperada in ESPERADAS.items():
-    instalada = versao_instalada(pacote)
-    status = "✅" if instalada == esperada else "⚠️"
-    linhas.append({"Pacote": pacote, "Esperada": esperada, "Instalada": instalada, "Status": status})
-st.table(linhas)
-
-with st.expander("Dependências internas do servidor (diagnóstico)"):
-    st.table([{"Pacote": p, "Instalada": versao_instalada(p)} for p in DIAGNOSTICO])
-
-# ---------------------------------------------------------------------------
-# 3) Teste de importação
-#    Importar de fato cada biblioteca revela erros de compilação/binários
-#    que a simples leitura da versão não mostraria.
-# ---------------------------------------------------------------------------
-st.subheader("3. Teste de importação")
-modulos = ["pandas", "numpy", "plotly.express", "yfinance", "sqlalchemy", "psycopg2"]
-falhas = []
-for modulo in modulos:
-    try:
-        __import__(modulo)
-    except Exception as erro:            # qualquer falha de importação é registrada
-        falhas.append(f"{modulo}: {type(erro).__name__} - {erro}")
-
-if falhas:
-    st.error("❌ Falhas de importação:\n\n" + "\n\n".join(falhas))
-else:
-    st.success(f"✅ Todas as {len(modulos)} bibliotecas importaram sem erro.")
-
-# ---------------------------------------------------------------------------
-# 4) Teste opcional do yfinance a partir da nuvem
-#    Fica atrás de um botão para não consultar o Yahoo a cada visita
-#    (respeito aos limites de requisição - item 4.2 do edital).
-#    O resultado fica em cache por 1 hora (@st.cache_data com ttl).
-# ---------------------------------------------------------------------------
-st.subheader("4. Teste de coleta (yfinance)")
-
-@st.cache_data(ttl=3600, show_spinner="Consultando o Yahoo Finance...")
-def baixar_amostra(ticker: str):
-    """Baixa 5 pregões de um ativo para testar a conexão com o Yahoo Finance."""
-    import yfinance as yf
-    return yf.download(ticker, period="5d", auto_adjust=False, progress=False)
-
-if st.button("Testar download de PETR4.SA (últimos 5 pregões)"):
-    try:
-        amostra = baixar_amostra("PETR4.SA")
-        if amostra is None or amostra.empty:
-            st.warning("⚠️ O download retornou vazio. Anote e avise.")
-        else:
-            st.success(f"✅ yfinance funcionando: {len(amostra)} linhas recebidas.")
-            st.dataframe(amostra)
-    except Exception as erro:
-        st.error(f"❌ Falha no yfinance: {type(erro).__name__} - {erro}")
-
-st.divider()
-st.caption("App temporário de validação. Será substituído pelo Data App definitivo.")
+st.info("🚧 App em construção: os próximos cards adicionam cache, filtros, KPIs e gráficos.")
