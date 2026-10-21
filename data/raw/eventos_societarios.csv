@@ -1,0 +1,2 @@
+ticker,tipo,descricao,data_com,data_ex,preco_com_yahoo,escala_nominal_ativo,preco_com_nominal,ativo_recebido,preco_recebido_nominal,acoes_por_unidade_recebida,valor_distribuido_por_acao,fator_ajuste
+ITUB4.SA,cisão,Cisão da participação na XP (XPart): acionistas receberam BDRs XPBR31,2021-10-01,2021-10-04,26.187113,1.133,29.669999,XPBR31.SA,223.800003,43.3128323,5.16706,0.825849
