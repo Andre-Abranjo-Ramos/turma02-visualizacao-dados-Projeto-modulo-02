@@ -242,6 +242,16 @@ def exibir_kpis(k: dict):
 COR_IBOV = "#111827"          # Ibovespa em preto pontilhado: referência visual fixa
 TEMPLATE = "plotly_white"
 
+# Paleta FIXA por setor, igual em todos os gráficos (heurística de Nielsen:
+# consistência e padrões). Cores da paleta Okabe-Ito, segura para daltonismo.
+CORES_SETOR = {
+    "Indústria & Materiais": "#0072B2",   # azul
+    "Energia": "#E69F00",                 # laranja
+    "Financeiro": "#009E73",              # verde
+    "Consumo": "#CC79A7",                 # rosa
+    "Benchmark": COR_IBOV,                # preto (Ibovespa)
+}
+
 
 def estilo_padrao(fig, altura: int = 480):
     """Padrão visual comum: separador decimal brasileiro, legenda e margens enxutas."""
@@ -250,8 +260,9 @@ def estilo_padrao(fig, altura: int = 480):
         height=altura,
         separators=",.",                       # 1.234,56 (padrão brasileiro)
         hovermode="x unified",
-        legend=dict(title_text="", orientation="h", yanchor="bottom", y=1.02, x=0),
-        margin=dict(l=10, r=10, t=60, b=10),
+        # Legenda ABAIXO do gráfico, para não disputar espaço com o título
+        legend=dict(title_text="", orientation="h", yanchor="top", y=-0.14, x=0),
+        margin=dict(l=10, r=10, t=60, b=90),
         title=dict(x=0, font=dict(size=17)),
     )
     return fig
@@ -282,6 +293,7 @@ def grafico_ranking_base_100(resumo: pd.DataFrame):
     dados_rank = dados_rank.sort_values("valor_final")
     fig = px.bar(
         dados_rank, x="valor_final", y="codigo", color="setor", orientation="h",
+        color_discrete_map=CORES_SETOR,
         text=dados_rank["valor_final"].map(lambda v: f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")),
         labels={"valor_final": "Valor final de R$ 100 (R$)", "codigo": "", "setor": "Setor"},
         title="Ranking: valor final de R$ 100 investidos",
@@ -310,7 +322,7 @@ def grafico_risco_retorno(resumo: pd.DataFrame, resumo_ibov: pd.DataFrame):
     )
     fig = px.scatter(
         dados_rr, x="vol_pct", y="ret_pct", size="tamanho", color="setor", text="codigo",
-        size_max=48,
+        size_max=48, color_discrete_map=CORES_SETOR,
         hover_data={"codigo": True, "vol_pct": ":.1f", "ret_pct": ":.1f", "sharpe_empirico": ":.2f",
                     "tamanho": False, "setor": False},
         labels={"vol_pct": "Volatilidade anualizada (% a.a.)  →  mais risco",
@@ -318,7 +330,8 @@ def grafico_risco_retorno(resumo: pd.DataFrame, resumo_ibov: pd.DataFrame):
                 "sharpe_empirico": "Sharpe empírico", "codigo": "Ativo"},
         title="Risco × Retorno · tamanho da bolha = volume financeiro médio diário",
     )
-    fig.update_traces(textposition="top center", marker=dict(line=dict(width=1, color="white")))
+    fig.update_traces(textposition="top center", textfont=dict(size=12),
+                      marker=dict(line=dict(width=1, color="white")))
 
     vol_ibov = resumo_ibov["volatilidade_anual"].iloc[0] * 100
     ret_ibov = resumo_ibov["retorno_acumulado"].iloc[0] * 100
@@ -327,7 +340,7 @@ def grafico_risco_retorno(resumo: pd.DataFrame, resumo_ibov: pd.DataFrame):
                   annotation_position="bottom right")
     fig.add_vline(x=vol_ibov, line_dash="dash", line_color="#9CA3AF",
                   annotation_text=f"Volatilidade do Ibovespa ({vol_ibov:.1f}%)".replace(".", ","),
-                  annotation_position="top right")
+                  annotation_position="bottom right")   # embaixo: libera o topo p/ o quadrante
     fig.add_annotation(xref="paper", yref="paper", x=0.01, y=0.99, showarrow=False,
                        text="↖ mais retorno, menos risco que o índice", font=dict(color="#059669", size=12),
                        xanchor="left", yanchor="top")
@@ -341,6 +354,7 @@ def grafico_sharpe(resumo: pd.DataFrame):
     dados_s = resumo.sort_values("sharpe_empirico")
     fig = px.bar(
         dados_s, x="sharpe_empirico", y="codigo", color="setor", orientation="h",
+        color_discrete_map=CORES_SETOR,
         text=dados_s["sharpe_empirico"].map(lambda v: f"{v:.2f}".replace(".", ",")),
         labels={"sharpe_empirico": "Sharpe empírico (retorno por unidade de risco)", "codigo": "", "setor": "Setor"},
         title="Ranking do Sharpe empírico",
@@ -495,7 +509,8 @@ if veio_do_cache:
     st.caption(f"⚡ Dados servidos do cache em {tempo_leitura * 1000:.0f} ms "
                f"(carga original às {carregado_em:%H:%M:%S}).")
 else:
-    st.caption(f"🗄️ Dados lidos da fonte em {tempo_leitura:.2f} s e guardados em cache por "
+    st.caption(f"🗄️ Dados lidos da fonte em {tempo_leitura:.2f} s ".replace(".", ",") +
+               "e guardados em cache por "
                f"{TTL_CACHE // 60} min.")
 
 # ---------------------------------------------------------------------------
