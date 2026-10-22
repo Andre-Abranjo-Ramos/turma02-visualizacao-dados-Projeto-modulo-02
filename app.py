@@ -15,7 +15,7 @@ Arquitetura (o app NÃO recalcula o pipeline; ele consome a base tratada):
 Construção incremental, um card do Trello por camada:
     [x] Conexão resiliente (PostgreSQL + contingência CSV)
     [x] Cache com @st.cache_data
-    [ ] Filtros na sidebar com session_state e reset
+    [x] Filtros na sidebar com session_state e reset
     [ ] KPIs com st.metric
     [ ] Abas analíticas (Base 100, Risco x Retorno, Distribuição, Drawdown, Médias Móveis)
     [ ] Aba de dados, metodologia e download
@@ -154,6 +154,54 @@ def calcular_resumo(recorte: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# ESTADO DOS FILTROS (st.session_state)
+# ---------------------------------------------------------------------------
+# Cada filtro tem uma CHAVE no st.session_state. O Streamlit reexecuta o script
+# inteiro a cada clique; o session_state é a "memória" que mantém as escolhas
+# do usuário entre essas execuções.
+CHAVE_SETORES = "filtro_setores"
+CHAVE_ATIVOS = "filtro_ativos"
+CHAVE_PERIODO = "filtro_periodo"
+CHAVE_ATIVO_SMA = "filtro_ativo_sma"
+CHAVE_IBOV = "filtro_mostrar_ibov"
+CODIGO_BENCHMARK = "IBOV"
+
+
+def valores_padrao(dados: pd.DataFrame) -> dict:
+    """Estado inicial (e de reset): tudo selecionado, período completo."""
+    acoes = dados[dados["codigo"] != CODIGO_BENCHMARK]
+    return {
+        CHAVE_SETORES: sorted(acoes["setor"].unique()),
+        CHAVE_ATIVOS: sorted(acoes["codigo"].unique()),
+        CHAVE_PERIODO: (dados["data"].min().date(), dados["data"].max().date()),
+        CHAVE_ATIVO_SMA: "PETR4",
+        CHAVE_IBOV: True,
+    }
+
+
+def iniciar_estado(padrao: dict):
+    """Cria as chaves só na PRIMEIRA execução; depois preserva as escolhas."""
+    for chave, valor in padrao.items():
+        if chave not in st.session_state:
+            st.session_state[chave] = valor
+
+
+def resetar_filtros(padrao: dict):
+    """Callback do botão de reset: devolve todos os filtros ao estado inicial."""
+    for chave, valor in padrao.items():
+        st.session_state[chave] = valor
+
+
+def ao_mudar_setores(mapa_setor_ativos: dict):
+    """
+    Filtro CRUZADO: ao mudar os setores, a lista de ativos passa a conter todos
+    os ativos dos setores escolhidos (e nenhum dos setores removidos).
+    """
+    setores = st.session_state[CHAVE_SETORES]
+    st.session_state[CHAVE_ATIVOS] = sorted(c for s in setores for c in mapa_setor_ativos[s])
+
+
+# ---------------------------------------------------------------------------
 # INTERFACE
 # ---------------------------------------------------------------------------
 st.title("📈 Performance de Ações na B3 · 2021–2023")
@@ -171,8 +219,55 @@ except Exception as erro:
 tempo_leitura = time.perf_counter() - cronometro
 veio_do_cache = carregado_em < inicio_execucao  # carga anterior a esta execução
 
-# Barra lateral: controle do cache
+PADRAO = valores_padrao(dados)
+iniciar_estado(PADRAO)
+acoes_cadastro = dados[dados["codigo"] != CODIGO_BENCHMARK][["codigo", "setor"]].drop_duplicates()
+MAPA_SETOR_ATIVOS = {setor: sorted(grupo["codigo"]) for setor, grupo in acoes_cadastro.groupby("setor")}
+DATA_MIN, DATA_MAX = PADRAO[CHAVE_PERIODO]
+
+# ---------------------------------------------------------------------------
+# BARRA LATERAL: FILTROS
+# Os widgets usam apenas "key" (sem "default"): o valor vem do session_state,
+# que foi preenchido em iniciar_estado(). Isso evita conflito entre os dois.
+# ---------------------------------------------------------------------------
 with st.sidebar:
+    st.header("🔎 Filtros")
+
+    st.multiselect(
+        "Setores",
+        options=sorted(MAPA_SETOR_ATIVOS),
+        key=CHAVE_SETORES,
+        on_change=ao_mudar_setores,
+        args=(MAPA_SETOR_ATIVOS,),
+        help="Ao mudar os setores, a lista de ativos é atualizada automaticamente.",
+    )
+
+    # Opções de ativos dependem dos setores escolhidos (filtro cruzado)
+    opcoes_ativos = sorted(c for s in st.session_state[CHAVE_SETORES] for c in MAPA_SETOR_ATIVOS[s])
+    st.session_state[CHAVE_ATIVOS] = [a for a in st.session_state[CHAVE_ATIVOS] if a in opcoes_ativos]
+    st.multiselect("Ativos", options=opcoes_ativos, key=CHAVE_ATIVOS)
+
+    st.date_input(
+        "Período",
+        min_value=DATA_MIN,
+        max_value=DATA_MAX,
+        key=CHAVE_PERIODO,
+        format="DD/MM/YYYY",
+        help="Base 100, retornos e drawdown são recalculados a partir do 1º dia escolhido.",
+    )
+
+    # Ativo da análise de médias móveis: precisa estar entre os ativos filtrados
+    opcoes_sma = st.session_state[CHAVE_ATIVOS] or PADRAO[CHAVE_ATIVOS]
+    if st.session_state[CHAVE_ATIVO_SMA] not in opcoes_sma:
+        st.session_state[CHAVE_ATIVO_SMA] = opcoes_sma[0]
+    st.selectbox("Ativo para médias móveis", options=opcoes_sma, key=CHAVE_ATIVO_SMA)
+
+    st.toggle("Mostrar Ibovespa nos gráficos", key=CHAVE_IBOV)
+
+    st.button("↺ Resetar filtros", on_click=resetar_filtros, args=(PADRAO,),
+              width="stretch", type="primary")
+
+    st.divider()
     st.subheader("⚡ Cache de dados")
     st.caption(f"Carregados às {carregado_em:%H:%M:%S} (horário de Brasília), "
                f"válidos por {TTL_CACHE // 60} min.")
@@ -180,14 +275,16 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# Status da fonte de dados (heurística de Nielsen: visibilidade do estado do sistema)
+# ---------------------------------------------------------------------------
+# STATUS: origem dos dados e cache (sempre visível, mesmo com filtro inválido)
+# Heurística de Nielsen: visibilidade do estado do sistema
+# ---------------------------------------------------------------------------
 if origem == "banco":
     st.success(f"🟢 Dados carregados do banco: {detalhe}")
 else:
     st.warning(f"🟠 Banco indisponível. Exibindo dados do {detalhe}. "
                "Os números são os mesmos; apenas a origem mudou.")
 
-# Evidência do cache (útil para a demonstração do vídeo)
 if veio_do_cache:
     st.caption(f"⚡ Dados servidos do cache em {tempo_leitura * 1000:.0f} ms "
                f"(carga original às {carregado_em:%H:%M:%S}).")
@@ -195,16 +292,46 @@ else:
     st.caption(f"🗄️ Dados lidos da fonte em {tempo_leitura:.2f} s e guardados em cache por "
                f"{TTL_CACHE // 60} min.")
 
-c1, c2, c3 = st.columns(3)
-c1.write(f"**Registros:** {len(dados):,}".replace(",", "."))
-c2.write(f"**Ativos:** {dados['codigo'].nunique()} (12 ações + Ibovespa)")
-c3.write(f"**Período:** {dados['data'].min():%d/%m/%Y} a {dados['data'].max():%d/%m/%Y}")
+# ---------------------------------------------------------------------------
+# VALIDAÇÃO DOS FILTROS (heurística de Nielsen: prevenção de erros)
+# ---------------------------------------------------------------------------
+setores_sel = st.session_state[CHAVE_SETORES]
+ativos_sel = st.session_state[CHAVE_ATIVOS]
+periodo = st.session_state[CHAVE_PERIODO]
 
-# Prévia dos indicadores do período completo (calculados com cache)
-recorte = recalcular_periodo(dados, dados["data"].min(), dados["data"].max())
+if not ativos_sel:
+    st.warning("Selecione ao menos um setor e um ativo na barra lateral.")
+    st.stop()
+if not isinstance(periodo, (tuple, list)) or len(periodo) < 2:
+    st.info("Escolha a data final do período no calendário da barra lateral.")
+    st.stop()
+
+inicio_periodo, fim_periodo = pd.Timestamp(periodo[0]), pd.Timestamp(periodo[1])
+pregoes_no_periodo = dados.loc[dados["data"].between(inicio_periodo, fim_periodo), "data"].nunique()
+if pregoes_no_periodo < 22:
+    st.warning(f"O período escolhido tem só {pregoes_no_periodo} pregões. "
+               "Escolha pelo menos ~1 mês para que retornos e volatilidade façam sentido.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# DADOS FILTRADOS (com cache): período recalculado + ativos escolhidos
+# ---------------------------------------------------------------------------
+recorte_periodo = recalcular_periodo(dados, inicio_periodo, fim_periodo)
+codigos_visiveis = ativos_sel + ([CODIGO_BENCHMARK] if st.session_state[CHAVE_IBOV] else [])
+recorte = recorte_periodo[recorte_periodo["codigo"].isin(codigos_visiveis)]
+benchmark = recorte_periodo[recorte_periodo["codigo"] == CODIGO_BENCHMARK]  # sempre disponível p/ KPIs
 resumo = calcular_resumo(recorte)
 
-st.subheader("Prévia: indicadores por ativo (2021–2023)")
+# ---------------------------------------------------------------------------
+# CABEÇALHO: filtros aplicados
+# ---------------------------------------------------------------------------
+st.markdown(
+    f"**Filtros aplicados:** {len(setores_sel)} setor(es) · {len(ativos_sel)} ativo(s) · "
+    f"{inicio_periodo:%d/%m/%Y} a {fim_periodo:%d/%m/%Y} ({pregoes_no_periodo} pregões)"
+    + (" · Ibovespa como referência" if st.session_state[CHAVE_IBOV] else "")
+)
+
+st.subheader("Indicadores por ativo no período filtrado")
 st.dataframe(
     resumo[["codigo", "empresa", "setor", "retorno_acumulado", "volatilidade_anual",
             "sharpe_empirico", "drawdown_maximo"]],
@@ -221,4 +348,4 @@ st.dataframe(
     },
 )
 
-st.info("🚧 App em construção: os próximos cards adicionam filtros, KPIs e gráficos.")
+st.info("🚧 App em construção: os próximos cards adicionam KPIs e gráficos.")
