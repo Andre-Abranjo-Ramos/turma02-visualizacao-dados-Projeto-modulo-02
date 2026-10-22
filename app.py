@@ -295,6 +295,65 @@ def grafico_ranking_base_100(resumo: pd.DataFrame):
     return fig
 
 
+def grafico_risco_retorno(resumo: pd.DataFrame, resumo_ibov: pd.DataFrame):
+    """
+    P2 - Dispersão Risco x Retorno (grade oficial do edital, gráfico 2).
+    X = volatilidade anualizada, Y = retorno acumulado, tamanho = volume financeiro médio.
+    As linhas de referência no Ibovespa dividem o plano em 4 quadrantes:
+    o quadrante SUPERIOR ESQUERDO reúne mais retorno com menos risco que o índice.
+    """
+    dados_rr = resumo.assign(
+        vol_pct=resumo["volatilidade_anual"] * 100,
+        ret_pct=resumo["retorno_acumulado"] * 100,
+        # Ibovespa não tem volume financeiro (índice): recebe o menor tamanho
+        tamanho=resumo["volume_financeiro_medio"].fillna(resumo["volume_financeiro_medio"].min()),
+    )
+    fig = px.scatter(
+        dados_rr, x="vol_pct", y="ret_pct", size="tamanho", color="setor", text="codigo",
+        size_max=48,
+        hover_data={"codigo": True, "vol_pct": ":.1f", "ret_pct": ":.1f", "sharpe_empirico": ":.2f",
+                    "tamanho": False, "setor": False},
+        labels={"vol_pct": "Volatilidade anualizada (% a.a.)  →  mais risco",
+                "ret_pct": "Retorno acumulado no período (%)", "setor": "Setor",
+                "sharpe_empirico": "Sharpe empírico", "codigo": "Ativo"},
+        title="Risco × Retorno · tamanho da bolha = volume financeiro médio diário",
+    )
+    fig.update_traces(textposition="top center", marker=dict(line=dict(width=1, color="white")))
+
+    vol_ibov = resumo_ibov["volatilidade_anual"].iloc[0] * 100
+    ret_ibov = resumo_ibov["retorno_acumulado"].iloc[0] * 100
+    fig.add_hline(y=ret_ibov, line_dash="dash", line_color="#9CA3AF",
+                  annotation_text=f"Retorno do Ibovespa ({ret_ibov:.1f}%)".replace(".", ","),
+                  annotation_position="bottom right")
+    fig.add_vline(x=vol_ibov, line_dash="dash", line_color="#9CA3AF",
+                  annotation_text=f"Volatilidade do Ibovespa ({vol_ibov:.1f}%)".replace(".", ","),
+                  annotation_position="top right")
+    fig.add_annotation(xref="paper", yref="paper", x=0.01, y=0.99, showarrow=False,
+                       text="↖ mais retorno, menos risco que o índice", font=dict(color="#059669", size=12),
+                       xanchor="left", yanchor="top")
+    fig = estilo_padrao(fig, altura=560)
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+def grafico_sharpe(resumo: pd.DataFrame):
+    """Ranking do Sharpe empírico (retorno anualizado ÷ volatilidade anualizada)."""
+    dados_s = resumo.sort_values("sharpe_empirico")
+    fig = px.bar(
+        dados_s, x="sharpe_empirico", y="codigo", color="setor", orientation="h",
+        text=dados_s["sharpe_empirico"].map(lambda v: f"{v:.2f}".replace(".", ",")),
+        labels={"sharpe_empirico": "Sharpe empírico (retorno por unidade de risco)", "codigo": "", "setor": "Setor"},
+        title="Ranking do Sharpe empírico",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False,
+                      hovertemplate="%{y}: %{x:.2f}<extra></extra>")
+    fig.update_yaxes(categoryorder="array", categoryarray=dados_s["codigo"].tolist())
+    fig.add_vline(x=0, line_color="#6B7280")
+    fig = estilo_padrao(fig, altura=max(320, 34 * len(dados_s) + 120))
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
 def reais(valor: float) -> str:
     """1234.5 -> 'R$ 1.234,50'"""
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -520,24 +579,61 @@ with aba_base100:
                "retorno alto pode ter vindo acompanhado de risco alto. Desempenho passado não garante "
                "resultado futuro.")
 
-for aba in (aba_risco, aba_distribuicao, aba_drawdown, aba_medias, aba_dados):
+with aba_risco:
+    st.markdown("##### P2 · Quais ativos entregaram mais retorno para o risco que ofereceram?")
+    st.plotly_chart(grafico_risco_retorno(resumo, resumo_ibov), width="stretch")
+
+    acoes_rr = resumo_acoes
+    lider = acoes_rr.loc[acoes_rr["sharpe_empirico"].idxmax()]
+    menor_risco = acoes_rr.loc[acoes_rr["volatilidade_anual"].idxmin()]
+    vol_ibov = resumo_ibov["volatilidade_anual"].iloc[0]
+    ret_ibov = resumo_ibov["retorno_acumulado"].iloc[0]
+    quadrante_bom = acoes_rr[(acoes_rr["retorno_acumulado"] > ret_ibov) &
+                             (acoes_rr["volatilidade_anual"] < vol_ibov)]["codigo"].tolist()
+    if len(quadrante_bom) == 1:
+        texto_quadrante = (f"apenas **{quadrante_bom[0]}** ficou no quadrante de mais retorno "
+                           "com menos risco que o Ibovespa")
+    elif quadrante_bom:
+        texto_quadrante = (f"**{', '.join(quadrante_bom)}** ficaram no quadrante de mais retorno "
+                           "com menos risco que o Ibovespa")
+    else:
+        texto_quadrante = "nenhum ativo filtrado superou o Ibovespa com volatilidade menor que a dele"
+    st.markdown(
+        f"**Insight:** o melhor retorno por unidade de risco foi de **{lider['codigo']}** "
+        f"(Sharpe **{lider['sharpe_empirico']:.2f}**: ".replace(".", ",") +
+        f"{pct(lider['retorno_anualizado'], sinal=True)} a.a. "
+        f"com volatilidade de {pct(lider['volatilidade_anual'])} a.a.). O ativo menos volátil foi "
+        f"**{menor_risco['codigo']}** ({pct(menor_risco['volatilidade_anual'])} a.a.). No período, "
+        f"{texto_quadrante}."
+    )
+
+    col_graf, col_tab = st.columns([1, 1])
+    with col_graf:
+        st.plotly_chart(grafico_sharpe(resumo), width="stretch")
+    with col_tab:
+        st.markdown("**Indicadores por ativo**")
+        st.dataframe(
+            resumo.sort_values("sharpe_empirico", ascending=False)[
+                ["codigo", "setor", "retorno_acumulado", "retorno_anualizado",
+                 "volatilidade_anual", "sharpe_empirico"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "codigo": "Ativo",
+                "setor": "Setor",
+                "retorno_acumulado": st.column_config.NumberColumn("Retorno acum.", format="percent"),
+                "retorno_anualizado": st.column_config.NumberColumn("Retorno a.a.", format="percent"),
+                "volatilidade_anual": st.column_config.NumberColumn("Volatilidade a.a.", format="percent"),
+                "sharpe_empirico": st.column_config.ProgressColumn(
+                    "Sharpe", format="%.2f",
+                    min_value=float(min(0, resumo["sharpe_empirico"].min())),
+                    max_value=float(max(resumo["sharpe_empirico"].max(), 0.01))),
+            },
+        )
+    st.caption("**Ação sugerida:** comparar ativos pelo retorno *ajustado ao risco*, e não só pelo retorno. "
+               "**Limitação:** o Sharpe aqui é empírico, com taxa livre de risco igual a zero. Com a Selic "
+               "elevada em 2022–2023, o Sharpe descontando o CDI seria menor para todos os ativos.")
+
+for aba in (aba_distribuicao, aba_drawdown, aba_medias, aba_dados):
     with aba:
         st.info("🚧 Aba em construção: será preenchida nos próximos cards.")
-
-st.subheader("Indicadores por ativo no período filtrado")
-st.dataframe(
-    resumo[["codigo", "empresa", "setor", "retorno_acumulado", "volatilidade_anual",
-            "sharpe_empirico", "drawdown_maximo"]],
-    hide_index=True,
-    width="stretch",
-    column_config={
-        "codigo": "Ativo",
-        "empresa": "Empresa",
-        "setor": "Setor",
-        "retorno_acumulado": st.column_config.NumberColumn("Retorno acumulado", format="percent"),
-        "volatilidade_anual": st.column_config.NumberColumn("Volatilidade a.a.", format="percent"),
-        "sharpe_empirico": st.column_config.NumberColumn("Sharpe empírico", format="%.2f"),
-        "drawdown_maximo": st.column_config.NumberColumn("Drawdown máximo", format="percent"),
-    },
-)
-
