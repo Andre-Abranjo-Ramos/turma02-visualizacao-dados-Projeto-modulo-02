@@ -16,7 +16,7 @@ Construção incremental, um card do Trello por camada:
     [x] Conexão resiliente (PostgreSQL + contingência CSV)
     [x] Cache com @st.cache_data
     [x] Filtros na sidebar com session_state e reset
-    [ ] KPIs com st.metric
+    [x] KPIs com st.metric
     [ ] Abas analíticas (Base 100, Risco x Retorno, Distribuição, Drawdown, Médias Móveis)
     [ ] Aba de dados, metodologia e download
 """
@@ -151,6 +151,88 @@ def recalcular_periodo(dados: pd.DataFrame, inicio: pd.Timestamp, fim: pd.Timest
 def calcular_resumo(recorte: pd.DataFrame) -> pd.DataFrame:
     """Indicadores por ativo (retorno, volatilidade, Sharpe, drawdown...) do recorte."""
     return metrics.resumo_por_ativo(recorte)
+
+
+# ---------------------------------------------------------------------------
+# FORMATAÇÃO NO PADRÃO BRASILEIRO (vírgula decimal)
+# ---------------------------------------------------------------------------
+def pct(valor: float, casas: int = 1, sinal: bool = False) -> str:
+    """0.2287 -> '22,9%' (ou '+22,9%' com sinal=True)."""
+    texto = f"{valor * 100:{'+' if sinal else ''}.{casas}f}%"
+    return texto.replace(".", ",")
+
+
+def pontos_percentuais(valor: float) -> str:
+    """Diferença entre dois percentuais: 0.105 -> '+10,5 p.p.'"""
+    numero = f"{valor * 100:+.1f}".replace(".", ",")
+    return f"{numero} p.p."
+
+
+# ---------------------------------------------------------------------------
+# KPIs ESTRATÉGICOS (grade oficial do edital - Linha 2)
+# ---------------------------------------------------------------------------
+def calcular_kpis(resumo_acoes: pd.DataFrame, resumo_ibov: pd.DataFrame) -> dict:
+    """
+    resumo_acoes: indicadores dos ativos FILTRADOS (sem o Ibovespa)
+    resumo_ibov : indicadores do Ibovespa no MESMO período (referência dos deltas)
+
+    Retorno médio da carteira = média simples dos retornos acumulados. Equivale a
+    uma carteira igualmente ponderada (mesmo valor investido em cada ativo no
+    1º dia, sem rebalanceamento).
+    """
+    ibov = resumo_ibov.iloc[0]
+    melhor = resumo_acoes.loc[resumo_acoes["retorno_acumulado"].idxmax()]
+    pior = resumo_acoes.loc[resumo_acoes["retorno_acumulado"].idxmin()]
+    retorno_medio = resumo_acoes["retorno_acumulado"].mean()
+    vol_media = resumo_acoes["volatilidade_anual"].mean()
+    return {
+        "n_ativos": len(resumo_acoes),
+        "retorno_medio": retorno_medio,
+        "retorno_ibov": ibov["retorno_acumulado"],
+        "melhor": melhor,
+        "pior": pior,
+        "vol_media": vol_media,
+        "vol_ibov": ibov["volatilidade_anual"],
+        "acima_ibov": int((resumo_acoes["retorno_acumulado"] > ibov["retorno_acumulado"]).sum()),
+    }
+
+
+def exibir_kpis(k: dict):
+    """4 cartões st.metric lado a lado, cada um com delta e explicação (help)."""
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Retorno médio da carteira",
+        pct(k["retorno_medio"], sinal=True),
+        delta=f"{pontos_percentuais(k['retorno_medio'] - k['retorno_ibov'])} vs Ibovespa",
+        help=f"Média simples dos retornos acumulados dos {k['n_ativos']} ativos filtrados "
+             f"(carteira igualmente ponderada). Ibovespa no período: {pct(k['retorno_ibov'], sinal=True)}.",
+        border=True,
+    )
+    c2.metric(
+        "Ativo destaque",
+        f"{k['melhor']['codigo']}",
+        delta=f"{pct(k['melhor']['retorno_acumulado'], sinal=True)} no período",
+        help=f"Maior retorno acumulado entre os ativos filtrados: {k['melhor']['empresa']} "
+             f"({k['melhor']['setor']}).",
+        border=True,
+    )
+    c3.metric(
+        "Menor performance",
+        f"{k['pior']['codigo']}",
+        delta=f"{pct(k['pior']['retorno_acumulado'], sinal=True)} no período",
+        help=f"Menor retorno acumulado entre os ativos filtrados: {k['pior']['empresa']} "
+             f"({k['pior']['setor']}).",
+        border=True,
+    )
+    c4.metric(
+        "Volatilidade média (a.a.)",
+        pct(k["vol_media"]),
+        delta=f"{pontos_percentuais(k['vol_media'] - k['vol_ibov'])} vs Ibovespa",
+        delta_color="inverse",   # mais volatilidade = mais risco -> vermelho
+        help="Média das volatilidades anualizadas (desvio-padrão dos retornos diários x raiz de 252). "
+             f"Ibovespa no período: {pct(k['vol_ibov'])} a.a.",
+        border=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +413,22 @@ st.markdown(
     + (" · Ibovespa como referência" if st.session_state[CHAVE_IBOV] else "")
 )
 
+# ---------------------------------------------------------------------------
+# VISÃO EXECUTIVA: KPIs + frase-resumo (Pirâmide Invertida: contexto -> insight)
+# ---------------------------------------------------------------------------
+resumo_acoes = resumo[resumo["codigo"] != CODIGO_BENCHMARK]
+resumo_ibov = calcular_resumo(benchmark)
+kpis = calcular_kpis(resumo_acoes, resumo_ibov)
+exibir_kpis(kpis)
+
+comparacao = "acima" if kpis["retorno_medio"] > kpis["retorno_ibov"] else "abaixo"
+st.markdown(
+    f"> No período, a carteira de **{kpis['n_ativos']} ativo(s)** rendeu em média "
+    f"**{pct(kpis['retorno_medio'], sinal=True)}**, **{comparacao}** do Ibovespa "
+    f"(**{pct(kpis['retorno_ibov'], sinal=True)}**). **{kpis['acima_ibov']} de {kpis['n_ativos']}** "
+    f"ativo(s) superaram o índice. Retorno passado não garante retorno futuro."
+)
+
 st.subheader("Indicadores por ativo no período filtrado")
 st.dataframe(
     resumo[["codigo", "empresa", "setor", "retorno_acumulado", "volatilidade_anual",
@@ -348,4 +446,4 @@ st.dataframe(
     },
 )
 
-st.info("🚧 App em construção: os próximos cards adicionam KPIs e gráficos.")
+st.info("🚧 App em construção: os próximos cards adicionam as abas com gráficos.")
