@@ -17,7 +17,7 @@ Construção incremental, um card do Trello por camada:
     [x] Cache com @st.cache_data
     [x] Filtros na sidebar com session_state e reset
     [x] KPIs com st.metric
-    [ ] Abas analíticas (Base 100, Risco x Retorno, Distribuição, Drawdown, Médias Móveis)
+    [~] Abas analíticas (Base 100, Risco x Retorno, Distribuição, Drawdown, Médias Móveis)
     [ ] Aba de dados, metodologia e download
 """
 
@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from src import metrics  # mesmas fórmulas do pipeline (fonte única de cálculo)
@@ -236,6 +237,70 @@ def exibir_kpis(k: dict):
 
 
 # ---------------------------------------------------------------------------
+# GRÁFICOS (Plotly Express)
+# ---------------------------------------------------------------------------
+COR_IBOV = "#111827"          # Ibovespa em preto pontilhado: referência visual fixa
+TEMPLATE = "plotly_white"
+
+
+def estilo_padrao(fig, altura: int = 480):
+    """Padrão visual comum: separador decimal brasileiro, legenda e margens enxutas."""
+    fig.update_layout(
+        template=TEMPLATE,
+        height=altura,
+        separators=",.",                       # 1.234,56 (padrão brasileiro)
+        hovermode="x unified",
+        legend=dict(title_text="", orientation="h", yanchor="bottom", y=1.02, x=0),
+        margin=dict(l=10, r=10, t=60, b=10),
+        title=dict(x=0, font=dict(size=17)),
+    )
+    return fig
+
+
+def grafico_base_100(recorte: pd.DataFrame, resumo: pd.DataFrame):
+    """
+    P1 - Linha comparativa Base 100 (grade oficial do edital, gráfico 1).
+    Legenda ordenada do maior para o menor valor final, para leitura imediata.
+    """
+    ordem = resumo.sort_values("retorno_acumulado", ascending=False)["codigo"].tolist()
+    fig = px.line(
+        recorte, x="data", y="base_100", color="codigo",
+        category_orders={"codigo": ordem},
+        labels={"data": "", "base_100": "Valor de R$ 100 investidos (R$)", "codigo": "Ativo"},
+        title="Quanto valeriam R$ 100 investidos no primeiro dia do período",
+    )
+    fig.update_traces(hovertemplate="%{fullData.name}: R$ %{y:.2f}<extra></extra>", line=dict(width=1.8))
+    fig.update_traces(selector=dict(name=CODIGO_BENCHMARK), line=dict(color=COR_IBOV, width=3.5, dash="dot"))
+    fig.add_hline(y=100, line_dash="dash", line_color="#9CA3AF",
+                  annotation_text="R$ 100 (valor inicial)", annotation_position="bottom left")
+    return estilo_padrao(fig, altura=520)
+
+
+def grafico_ranking_base_100(resumo: pd.DataFrame):
+    """Ranking do valor final (complemento do gráfico de linhas)."""
+    dados_rank = resumo.assign(valor_final=100 * (1 + resumo["retorno_acumulado"]))
+    dados_rank = dados_rank.sort_values("valor_final")
+    fig = px.bar(
+        dados_rank, x="valor_final", y="codigo", color="setor", orientation="h",
+        text=dados_rank["valor_final"].map(lambda v: f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")),
+        labels={"valor_final": "Valor final de R$ 100 (R$)", "codigo": "", "setor": "Setor"},
+        title="Ranking: valor final de R$ 100 investidos",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False,
+                      hovertemplate="%{y}: R$ %{x:.2f}<extra></extra>")
+    fig.update_yaxes(categoryorder="array", categoryarray=dados_rank["codigo"].tolist())
+    fig.add_vline(x=100, line_dash="dash", line_color="#9CA3AF")
+    fig = estilo_padrao(fig, altura=max(320, 34 * len(dados_rank) + 120))
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+def reais(valor: float) -> str:
+    """1234.5 -> 'R$ 1.234,50'"""
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+# ---------------------------------------------------------------------------
 # ESTADO DOS FILTROS (st.session_state)
 # ---------------------------------------------------------------------------
 # Cada filtro tem uma CHAVE no st.session_state. O Streamlit reexecuta o script
@@ -429,6 +494,36 @@ st.markdown(
     f"ativo(s) superaram o índice. Retorno passado não garante retorno futuro."
 )
 
+# ---------------------------------------------------------------------------
+# ABAS TEMÁTICAS (st.tabs): uma pergunta de negócio por aba
+# ---------------------------------------------------------------------------
+aba_base100, aba_risco, aba_distribuicao, aba_drawdown, aba_medias, aba_dados = st.tabs([
+    "📈 Base 100", "⚖️ Risco × Retorno", "📊 Distribuição", "📉 Drawdown",
+    "〰️ Médias Móveis", "🗂️ Dados & Metodologia",
+])
+
+with aba_base100:
+    # Pirâmide Invertida: CONTEXTO -> INSIGHT -> AÇÃO
+    st.markdown("##### P1 · Se um investidor aplicasse R$ 100 em cada ativo no início do período, quanto teria ao final?")
+    st.plotly_chart(grafico_base_100(recorte, resumo), width="stretch")
+
+    melhor, pior = kpis["melhor"], kpis["pior"]
+    st.markdown(
+        f"**Insight:** R$ 100 em **{melhor['codigo']}** viraram **{reais(100 * (1 + melhor['retorno_acumulado']))}**, "
+        f"enquanto em **{pior['codigo']}** terminaram em **{reais(100 * (1 + pior['retorno_acumulado']))}**. "
+        f"O Ibovespa encerrou em **{reais(100 * (1 + kpis['retorno_ibov']))}**, e "
+        f"**{kpis['acima_ibov']} de {kpis['n_ativos']}** ativo(s) ficaram acima dele."
+    )
+    st.plotly_chart(grafico_ranking_base_100(resumo), width="stretch")
+    st.caption("**Ação sugerida:** usar a comparação com o Ibovespa para avaliar se a seleção de ativos "
+               "agregou valor, e cruzar com a aba *Risco × Retorno* antes de qualquer conclusão: "
+               "retorno alto pode ter vindo acompanhado de risco alto. Desempenho passado não garante "
+               "resultado futuro.")
+
+for aba in (aba_risco, aba_distribuicao, aba_drawdown, aba_medias, aba_dados):
+    with aba:
+        st.info("🚧 Aba em construção: será preenchida nos próximos cards.")
+
 st.subheader("Indicadores por ativo no período filtrado")
 st.dataframe(
     resumo[["codigo", "empresa", "setor", "retorno_acumulado", "volatilidade_anual",
@@ -446,4 +541,3 @@ st.dataframe(
     },
 )
 
-st.info("🚧 App em construção: os próximos cards adicionam as abas com gráficos.")
