@@ -17,8 +17,8 @@ Construção incremental, um card do Trello por camada:
     [x] Cache com @st.cache_data
     [x] Filtros na sidebar com session_state e reset
     [x] KPIs com st.metric
-    [~] Abas analíticas (Base 100, Risco x Retorno, Distribuição, Drawdown, Médias Móveis)
-    [ ] Aba de dados, metodologia e download
+    [x] Abas analíticas (Base 100, Risco x Retorno, Distribuição, Drawdown, Médias Móveis)
+    [x] Aba de dados, metodologia e download
 """
 
 import time
@@ -125,6 +125,26 @@ def carregar_dados() -> tuple[pd.DataFrame, str, str, datetime]:
         motivo = type(erro).__name__
         return (padronizar(ler_contingencia()), "csv",
                 f"CSV local de contingência (motivo: {motivo})", carregado_em)
+
+
+ARQ_QUALIDADE = RAIZ / "data" / "processed" / "relatorio_limpeza.csv"
+URL_REPOSITORIO = "https://github.com/Andre-Abranjo-Ramos/turma02-visualizacao-dados-Projeto-modulo-02"
+
+
+@st.cache_data(ttl=TTL_CACHE, show_spinner=False)
+def ler_relatorio_qualidade() -> pd.DataFrame:
+    """Relatório das verificações do pipeline (src/transform.py), versionado no repositório."""
+    return pd.read_csv(ARQ_QUALIDADE, encoding="utf-8")
+
+
+@st.cache_data(ttl=TTL_CACHE, show_spinner=False)
+def gerar_csv(tabela: pd.DataFrame) -> bytes:
+    """
+    CSV no padrão brasileiro, para abrir direto no Excel em português:
+    separador ";", decimal ",", datas DD/MM/AAAA e UTF-8 com BOM (acentos corretos).
+    """
+    return tabela.to_csv(index=False, sep=";", decimal=",", date_format="%d/%m/%Y",
+                         encoding="utf-8-sig").encode("utf-8-sig")
 
 
 # ---------------------------------------------------------------------------
@@ -970,4 +990,119 @@ with aba_medias:
                "(SMA 21) e 49 (SMA 50) pregões de 2021, anteriores ao início da base.")
 
 with aba_dados:
-    st.info("🚧 Aba em construção: será preenchida no próximo card.")
+    # ---------------------------------------------------------------- dados
+    st.markdown("##### 🗂️ Dados filtrados")
+    colunas_exportacao = {
+        "data": "Data", "codigo": "Ativo", "empresa": "Empresa", "setor": "Setor",
+        "fechamento": "Fechamento (R$)", "fechamento_ajustado": "Fechamento ajustado (R$)",
+        "volume": "Volume (ações)", "volume_financeiro": "Volume financeiro estimado (R$)",
+        "retorno_diario": "Retorno diário", "base_100": "Base 100",
+        "retorno_acumulado": "Retorno acumulado", "drawdown": "Drawdown",
+        "sma_21": "SMA 21 (R$)", "sma_50": "SMA 50 (R$)", "pregao_sintetico": "Pregão sintético",
+    }
+    exportar = (recorte.sort_values(["codigo", "data"])[list(colunas_exportacao)]
+                .rename(columns=colunas_exportacao))
+    st.caption(f"{len(exportar):,} linhas · {exportar['Ativo'].nunique()} ativo(s) · "
+               f"{inicio_periodo:%d/%m/%Y} a {fim_periodo:%d/%m/%Y}. "
+               "Os indicadores refletem o período filtrado (Base 100 e retornos recomeçam no 1º dia)."
+               .replace(",", "."))
+    st.dataframe(
+        exportar, hide_index=True, width="stretch", height=380,
+        column_config={
+            "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Retorno diário": st.column_config.NumberColumn(format="percent"),
+            "Retorno acumulado": st.column_config.NumberColumn(format="percent"),
+            "Drawdown": st.column_config.NumberColumn(format="percent"),
+            "Base 100": st.column_config.NumberColumn(format="%.2f"),
+            "Fechamento (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Fechamento ajustado (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+            "SMA 21 (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+            "SMA 50 (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Volume financeiro estimado (R$)": st.column_config.NumberColumn(format="compact"),
+        },
+    )
+
+    sufixo = f"{inicio_periodo:%Y-%m-%d}_a_{fim_periodo:%Y-%m-%d}"
+    col_d1, col_d2 = st.columns(2)
+    col_d1.download_button(
+        "⬇️ Baixar série diária filtrada (CSV)",
+        data=gerar_csv(exportar),
+        file_name=f"cotacoes_filtradas_{sufixo}.csv",
+        mime="text/csv",
+        width="stretch",
+        help="Separador ';' e vírgula decimal: abre direto no Excel em português.",
+    )
+    resumo_export = resumo[["codigo", "empresa", "setor", "retorno_acumulado", "retorno_anualizado",
+                            "volatilidade_anual", "sharpe_empirico", "assimetria", "curtose",
+                            "drawdown_maximo", "data_drawdown_maximo"]]
+    col_d2.download_button(
+        "⬇️ Baixar indicadores por ativo (CSV)",
+        data=gerar_csv(resumo_export),
+        file_name=f"indicadores_por_ativo_{sufixo}.csv",
+        mime="text/csv",
+        width="stretch",
+        help="Um resumo por ativo no período filtrado (retorno, risco, Sharpe, drawdown).",
+    )
+
+    st.divider()
+
+    # ---------------------------------------------------------- metodologia
+    st.markdown("##### 🔬 Metodologia")
+    st.markdown(
+        "**Fonte:** cotações diárias da B3 obtidas no Yahoo Finance (biblioteca `yfinance`, sufixo `.SA`), "
+        "de 04/01/2021 a 28/12/2023: 745 pregões, 12 ações de 4 setores e o Ibovespa como referência.\n\n"
+        "**Pipeline reproduzível** (código em `src/`):"
+    )
+    st.markdown(
+        "| Etapa | Script | O que faz |\n"
+        "|---|---|---|\n"
+        "| 1. Extração | `extract.py` | Baixa as cotações (mantendo o *Adj Close*) |\n"
+        "| 2. Eventos | `eventos.py` | Calcula o fator da cisão XP/ITUB4, não ajustada pela fonte |\n"
+        "| 3. Limpeza | `transform.py` | Encoding, tipos, datas, duplicados, nulos, consistência, calendário (21 verificações) |\n"
+        "| 4. Indicadores | `metrics.py` | Retornos, Base 100, volatilidade, Sharpe, drawdown e médias móveis |\n"
+        "| 5. Carga | `load.py` | Modelo estrela no Supabase (PostgreSQL), validado contra o CSV |\n"
+        "| 6. App | `app.py` | Lê a view `vw_cotacoes` (ou o CSV de contingência) e recalcula no período filtrado |"
+    )
+    with st.expander("Fórmulas dos indicadores"):
+        st.markdown(
+            "- **Retorno diário** = preço ajustado(t) ÷ preço ajustado(t−1) − 1\n"
+            "- **Base 100** = 100 × preço ajustado(t) ÷ preço ajustado do 1º dia do período\n"
+            "- **Retorno anualizado** = (1 + retorno acumulado) ^ (252 ÷ nº de retornos diários) − 1\n"
+            "- **Volatilidade anualizada** = desvio-padrão dos retornos diários × √252\n"
+            "- **Sharpe empírico** = retorno anualizado ÷ volatilidade anualizada (taxa livre de risco = 0)\n"
+            "- **Drawdown** = preço ajustado ÷ maior preço ajustado até a data − 1\n"
+            "- **SMA 21 / SMA 50** = média dos últimos 21 / 50 preços ajustados\n"
+            "- **Assimetria e curtose (excesso)** dos retornos diários: medidas amostrais do pandas\n\n"
+            "Usa-se o **preço ajustado** porque ele incorpora dividendos, JCP e desdobramentos: "
+            "representa o ganho total do acionista. O dicionário completo está em `docs/dicionario_dados.md`."
+        )
+
+    with st.expander("Qualidade dos dados: verificações do pipeline"):
+        qualidade = ler_relatorio_qualidade()
+        st.caption(f"{len(qualidade)} verificações executadas; as linhas com ocorrência foram tratadas ou documentadas.")
+        st.dataframe(qualidade.rename(columns={"etapa": "Etapa", "verificacao": "Verificação",
+                                               "ocorrencias": "Ocorrências", "acao": "Ação"}),
+                     hide_index=True, width="stretch")
+
+    st.divider()
+
+    # ------------------------------------------------------------ limitações
+    st.markdown("##### ⚠️ Limitações: o que estes dados **não** permitem concluir")
+    st.markdown(
+        "- **Não há relação de causa e efeito.** O app descreve desempenho; não explica *por que* um ativo "
+        "subiu ou caiu. Atribuir causas exigiria análise econométrica.\n"
+        "- **Desempenho passado não garante resultado futuro.** O período 2021–2023 teve alta de juros, eleições "
+        "e choques de commodities; outro período pode mostrar outro ranking.\n"
+        "- **Sharpe sem taxa livre de risco.** Com a Selic elevada em 2022–2023, o Sharpe descontando o CDI "
+        "seria menor para todos os ativos.\n"
+        "- **Volume financeiro estimado** (fechamento × quantidade), e não o valor oficial da B3.\n"
+        "- **Fonte não oficial.** O Yahoo Finance tem lacunas: 3 pregões sintéticos foram marcados "
+        "(BBDC4 02/06/2023, PRIO3 e WEGE3 26/09/2022) e a cisão XP/ITUB4 foi ajustada pelo projeto "
+        "(fator 0,825849). A EMBR3 foi consultada pelo código atual EMBJ3.\n"
+        "- **Universo restrito.** 12 ações escolhidas pelo edital, que não representam todo o mercado.\n"
+        "- **Nada aqui é recomendação de investimento.**"
+    )
+
+    st.divider()
+    st.caption(f"**Autor:** André Abranjo Ramos · Projeto Final de Visualização de Dados e BI (SENAI/SC · LAB365) · "
+               f"[Repositório no GitHub]({URL_REPOSITORIO}) · Dados: Yahoo Finance (yfinance).")
