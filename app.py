@@ -163,6 +163,11 @@ def pct(valor: float, casas: int = 1, sinal: bool = False) -> str:
     return texto.replace(".", ",")
 
 
+def num(valor: float, casas: int = 2) -> str:
+    """1.2345 -> '1,23' (número simples com vírgula decimal)."""
+    return f"{valor:.{casas}f}".replace(".", ",")
+
+
 def pontos_percentuais(valor: float) -> str:
     """Diferença entre dois percentuais: 0.105 -> '+10,5 p.p.'"""
     numero = f"{valor * 100:+.1f}".replace(".", ",")
@@ -364,6 +369,44 @@ def grafico_sharpe(resumo: pd.DataFrame):
     fig.update_yaxes(categoryorder="array", categoryarray=dados_s["codigo"].tolist())
     fig.add_vline(x=0, line_color="#6B7280")
     fig = estilo_padrao(fig, altura=max(320, 34 * len(dados_s) + 120))
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+def grafico_histograma_retornos(recorte: pd.DataFrame):
+    """
+    P3 - Histograma dos retornos diários com boxplot marginal (grade oficial, gráfico 3).
+    histnorm="percent": cada setor mostra a % dos SEUS dias em cada faixa, para que
+    setores com mais ativos (mais dias) não pareçam "maiores" só pelo volume de dados.
+    """
+    dados_h = recorte.dropna(subset=["retorno_diario"]).assign(ret_pct=lambda d: d["retorno_diario"] * 100)
+    fig = px.histogram(
+        dados_h, x="ret_pct", color="setor", marginal="box", nbins=160,
+        histnorm="percent", barmode="overlay", opacity=0.55,
+        color_discrete_map=CORES_SETOR,
+        labels={"ret_pct": "Retorno diário (%)", "setor": "Setor"},
+        title="Distribuição dos retornos diários por setor (% dos dias em cada faixa)",
+    )
+    fig.update_layout(yaxis_title="% dos dias")
+    fig.add_vline(x=0, line_color="#6B7280", line_width=1)
+    fig = estilo_padrao(fig, altura=540)
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+def grafico_boxplot_ativos(recorte: pd.DataFrame, resumo: pd.DataFrame):
+    """Boxplot por ativo: dispersão, mediana e dias extremos (outliers) lado a lado."""
+    ordem = resumo.sort_values("volatilidade_anual")["codigo"].tolist()   # do menos ao mais volátil
+    dados_b = recorte.dropna(subset=["retorno_diario"]).assign(ret_pct=lambda d: d["retorno_diario"] * 100)
+    fig = px.box(
+        dados_b, x="codigo", y="ret_pct", color="setor", points="outliers",
+        category_orders={"codigo": ordem}, color_discrete_map=CORES_SETOR,
+        hover_data={"data": "|%d/%m/%Y"},
+        labels={"codigo": "Ativo (do menos para o mais volátil)", "ret_pct": "Retorno diário (%)", "setor": "Setor"},
+        title="Dispersão dos retornos diários por ativo · pontos = dias extremos",
+    )
+    fig.add_hline(y=0, line_color="#6B7280", line_width=1)
+    fig = estilo_padrao(fig, altura=500)
     fig.update_layout(hovermode="closest")
     return fig
 
@@ -649,6 +692,66 @@ with aba_risco:
                "**Limitação:** o Sharpe aqui é empírico, com taxa livre de risco igual a zero. Com a Selic "
                "elevada em 2022–2023, o Sharpe descontando o CDI seria menor para todos os ativos.")
 
-for aba in (aba_distribuicao, aba_drawdown, aba_medias, aba_dados):
+with aba_distribuicao:
+    st.markdown("##### P3 · Como se comportam os retornos diários: dispersão, assimetria e dias extremos?")
+    st.plotly_chart(grafico_histograma_retornos(recorte), width="stretch")
+
+    retornos_acoes = recorte[(recorte["codigo"] != CODIGO_BENCHMARK)].dropna(subset=["retorno_diario"])
+    pior_dia = retornos_acoes.loc[retornos_acoes["retorno_diario"].idxmin()]
+    melhor_dia = retornos_acoes.loc[retornos_acoes["retorno_diario"].idxmax()]
+    cauda = resumo_acoes.loc[resumo_acoes["curtose"].idxmax()]
+    assimetrico = resumo_acoes.loc[resumo_acoes["assimetria"].idxmin()]
+    dias_extremos = (retornos_acoes["retorno_diario"].abs() > 0.05).mean()
+
+    # O texto se adapta aos números: só afirma "caudas pesadas" ou "quedas mais
+    # frequentes" quando a curtose e a assimetria realmente indicam isso.
+    caudas = ("as **caudas são pesadas**" if cauda["curtose"] > 3 else "as caudas são moderadas")
+    frase_cauda = f"**{cauda['codigo']}** tem as caudas mais pesadas (curtose {num(cauda['curtose'], 1)})"
+    if assimetrico["assimetria"] < 0:
+        complemento = ("quedas fortes foram mais frequentes que altas fortes")
+        if assimetrico["codigo"] == cauda["codigo"]:
+            frase_cauda += (f" e também a assimetria mais negativa ({num(assimetrico['assimetria'])}): "
+                            f"{complemento}.")
+        else:
+            frase_cauda += (f", e **{assimetrico['codigo']}** a assimetria mais negativa "
+                            f"({num(assimetrico['assimetria'])}): {complemento}.")
+    else:
+        frase_cauda += "; nenhum ativo filtrado teve assimetria negativa no período."
+
+    st.markdown(
+        f"**Insight:** a maior parte dos dias fica perto de zero, mas {caudas}: "
+        f"{pct(dias_extremos)} dos pregões das ações filtradas variaram mais de ±5% em um único dia. "
+        f"A pior queda foi de **{pior_dia['codigo']}** ({pct(pior_dia['retorno_diario'], sinal=True)} em "
+        f"{pior_dia['data']:%d/%m/%Y}) e a maior alta de **{melhor_dia['codigo']}** "
+        f"({pct(melhor_dia['retorno_diario'], sinal=True)} em {melhor_dia['data']:%d/%m/%Y}). "
+        + frase_cauda
+    )
+
+    st.plotly_chart(grafico_boxplot_ativos(recorte, resumo), width="stretch")
+
+    st.markdown("**Estatísticas dos retornos diários por ativo**")
+    st.dataframe(
+        resumo.sort_values("curtose", ascending=False)[
+            ["codigo", "setor", "retorno_diario_medio", "melhor_dia", "pior_dia", "assimetria", "curtose"]],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "codigo": "Ativo",
+            "setor": "Setor",
+            "retorno_diario_medio": st.column_config.NumberColumn("Retorno médio diário", format="percent"),
+            "melhor_dia": st.column_config.NumberColumn("Melhor dia", format="percent"),
+            "pior_dia": st.column_config.NumberColumn("Pior dia", format="percent"),
+            "assimetria": st.column_config.NumberColumn("Assimetria", format="%.2f",
+                                                         help="Negativa: quedas fortes mais frequentes que altas fortes"),
+            "curtose": st.column_config.NumberColumn("Curtose (excesso)", format="%.2f",
+                                                      help="0 = distribuição normal; maior = mais dias extremos"),
+        },
+    )
+    st.caption("**Ação sugerida:** além da volatilidade, olhar o *pior dia* e a *curtose* ao avaliar ativos "
+               "para quem tem pouca tolerância a quedas bruscas. **Limitação:** as estatísticas descrevem o "
+               "período filtrado e mudam conforme o recorte; os 3 pregões sintéticos da fonte entram como "
+               "retorno de 0%.")
+
+for aba in (aba_drawdown, aba_medias, aba_dados):
     with aba:
         st.info("🚧 Aba em construção: será preenchida nos próximos cards.")
