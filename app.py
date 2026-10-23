@@ -433,7 +433,10 @@ def grafico_drawdown(recorte: pd.DataFrame, resumo: pd.DataFrame):
     fig.update_traces(line=dict(width=1), hovertemplate="%{x|%d/%m/%Y}: %{y:.1f}%<extra></extra>")
     fig.update_yaxes(range=[dados_dd["dd_pct"].min() * 1.08, 3], ticksuffix="%")
     fig.update_xaxes(tickformat="%m/%y")
-    fig = estilo_padrao(fig, altura=170 * linhas + 170)
+    # Com a última linha incompleta, o Plotly só mostra datas sob a coluna mais longa.
+    # Forçar os rótulos em todos os painéis mantém a leitura do eixo de tempo.
+    fig.for_each_xaxis(lambda eixo: eixo.update(showticklabels=True))
+    fig = estilo_padrao(fig, altura=180 * linhas + 170)
     fig.update_layout(hovermode="closest")
     return fig
 
@@ -454,6 +457,78 @@ def grafico_ranking_drawdown(resumo: pd.DataFrame):
     fig.update_yaxes(categoryorder="array", categoryarray=dados_r["codigo"].tolist())
     fig.update_xaxes(range=[dados_r["dd_pct"].min() * 1.25, 0], ticksuffix="%")
     fig = estilo_padrao(fig, altura=max(320, 34 * len(dados_r) + 120))
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+def cruzamentos_medias(serie: pd.DataFrame) -> pd.DataFrame:
+    """
+    Dias em que a SMA 21 cruza a SMA 50:
+      - de baixo para cima -> "cruzamento de alta" (curto prazo passa a superar o médio)
+      - de cima para baixo -> "cruzamento de baixa"
+    Detectado pela troca de sinal de (SMA 21 - SMA 50) entre dois pregões seguidos.
+    """
+    s = serie.dropna(subset=["sma_21", "sma_50"]).sort_values("data")
+    acima = s["sma_21"] > s["sma_50"]
+    mudou = acima.ne(acima.shift()) & acima.shift().notna()
+    pontos = s.loc[mudou, ["data", "sma_21"]].copy()
+    pontos["tipo"] = acima[mudou].map({True: "Cruzamento de alta", False: "Cruzamento de baixa"})
+    return pontos
+
+
+def grafico_medias_moveis(serie: pd.DataFrame, codigo: str):
+    """
+    P5 - Multilinha: preço ajustado com SMA 21 e SMA 50 (grade oficial, gráfico 5).
+    Os cruzamentos entre as médias são marcados com triângulos.
+    """
+    longo = serie.melt(id_vars="data", value_vars=["fechamento_ajustado", "sma_21", "sma_50"],
+                       var_name="serie", value_name="preco")
+    nomes = {"fechamento_ajustado": "Preço ajustado", "sma_21": "SMA 21 (curto prazo)",
+             "sma_50": "SMA 50 (médio prazo)"}
+    longo["serie"] = longo["serie"].map(nomes)
+    fig = px.line(
+        longo, x="data", y="preco", color="serie",
+        color_discrete_map={"Preço ajustado": "#9CA3AF", "SMA 21 (curto prazo)": "#0072B2",
+                            "SMA 50 (médio prazo)": "#D55E00"},
+        labels={"data": "", "preco": "Preço ajustado (R$)", "serie": ""},
+        title=f"{codigo}: preço ajustado × médias móveis de 21 e 50 pregões",
+    )
+    fig.update_traces(hovertemplate="%{fullData.name}: R$ %{y:.2f}<extra></extra>")
+    fig.update_traces(selector=dict(name="Preço ajustado"), line=dict(width=1.4))
+    fig.update_traces(selector=dict(name="SMA 21 (curto prazo)"), line=dict(width=2.2))
+    fig.update_traces(selector=dict(name="SMA 50 (médio prazo)"), line=dict(width=2.6))
+
+    pontos = cruzamentos_medias(serie)
+    for tipo, simbolo, cor in [("Cruzamento de alta", "triangle-up", "#009E73"),
+                               ("Cruzamento de baixa", "triangle-down", "#C0392B")]:
+        p = pontos[pontos["tipo"] == tipo]
+        if not p.empty:
+            # Marcadores grandes e com contorno escuro: precisam se destacar sobre as 3 linhas
+            fig.add_scatter(x=p["data"], y=p["sma_21"], mode="markers", name=tipo,
+                            marker=dict(symbol=simbolo, size=16, color=cor, opacity=1,
+                                        line=dict(width=1.5, color="#111827")),
+                            hovertemplate=f"{tipo}<br>%{{x|%d/%m/%Y}}<extra></extra>")
+    return estilo_padrao(fig, altura=520)
+
+
+def grafico_acima_sma50(recorte: pd.DataFrame):
+    """% dos pregões em que o preço ficou acima da SMA 50: leitura simples de tendência."""
+    base = recorte.dropna(subset=["sma_50"])
+    tabela = (base.assign(acima=base["fechamento_ajustado"] > base["sma_50"])
+              .groupby(["codigo", "setor"], as_index=False)["acima"].mean())
+    tabela["pct"] = tabela["acima"] * 100
+    tabela = tabela.sort_values("pct")
+    fig = px.bar(
+        tabela, x="pct", y="codigo", color="setor", orientation="h", color_discrete_map=CORES_SETOR,
+        text=tabela["pct"].map(lambda v: f"{v:.0f}%"),
+        labels={"pct": "% dos pregões com preço acima da SMA 50", "codigo": "", "setor": "Setor"},
+        title="Em quantos pregões o preço ficou acima da média de 50 dias",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False, hovertemplate="%{y}: %{x:.0f}%<extra></extra>")
+    fig.update_yaxes(categoryorder="array", categoryarray=tabela["codigo"].tolist())
+    fig.update_xaxes(range=[0, 105], ticksuffix="%")
+    fig.add_vline(x=50, line_dash="dash", line_color="#9CA3AF")
+    fig = estilo_padrao(fig, altura=max(320, 34 * len(tabela) + 120))
     fig.update_layout(hovermode="closest")
     return fig
 
@@ -862,6 +937,37 @@ with aba_drawdown:
                "recuperação mais rápida. **Limitação:** o topo é contado a partir do 1º dia do período "
                "filtrado; quedas anteriores a ele não aparecem.")
 
-for aba in (aba_medias, aba_dados):
-    with aba:
-        st.info("🚧 Aba em construção: será preenchida nos próximos cards.")
+with aba_medias:
+    ativo_sma = st.session_state[CHAVE_ATIVO_SMA]
+    st.markdown("##### P5 · Como o preço se comportou frente às médias móveis de curto (21) e médio prazo (50)?")
+    st.caption(f"Ativo em análise: **{ativo_sma}** · troque em *Ativo para médias móveis*, na barra lateral.")
+
+    serie_sma = recorte_periodo[recorte_periodo["codigo"] == ativo_sma].sort_values("data")
+    st.plotly_chart(grafico_medias_moveis(serie_sma, ativo_sma), width="stretch")
+
+    validos = serie_sma.dropna(subset=["sma_50"])
+    pct_acima = (validos["fechamento_ajustado"] > validos["sma_50"]).mean()
+    pontos = cruzamentos_medias(serie_sma)
+    n_alta = int((pontos["tipo"] == "Cruzamento de alta").sum())
+    n_baixa = int((pontos["tipo"] == "Cruzamento de baixa").sum())
+    ultimo = validos.iloc[-1]
+    posicao_preco = "acima" if ultimo["fechamento_ajustado"] > ultimo["sma_50"] else "abaixo"
+    posicao_medias = "acima" if ultimo["sma_21"] > ultimo["sma_50"] else "abaixo"
+    st.markdown(
+        f"**Insight:** no período, o preço de **{ativo_sma}** ficou acima da SMA 50 em "
+        f"**{pct(pct_acima, 0)}** dos pregões com média disponível. "
+        f"As médias se cruzaram **{n_alta + n_baixa}** vez(es) "
+        f"({n_alta} de alta e {n_baixa} de baixa). No último pregão ({ultimo['data']:%d/%m/%Y}), o preço "
+        f"estava **{posicao_preco}** da SMA 50 e a SMA 21 **{posicao_medias}** da SMA 50."
+    )
+
+    st.plotly_chart(grafico_acima_sma50(recorte), width="stretch")
+    st.caption("**Ação sugerida:** usar as médias para *descrever* a tendência de cada período e comparar ativos "
+               "(barra acima de 50% indica preço predominantemente acima da média). **Limitação:** médias "
+               "móveis são indicadores *atrasados*; os cruzamentos geram sinais falsos e **não constituem "
+               "recomendação de compra ou venda**. As médias usam o histórico completo (filtros a partir de "
+               "abril/2021 já começam com as duas médias calculadas), mas não existem nos primeiros 20 "
+               "(SMA 21) e 49 (SMA 50) pregões de 2021, anteriores ao início da base.")
+
+with aba_dados:
+    st.info("🚧 Aba em construção: será preenchida no próximo card.")
