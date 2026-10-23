@@ -411,6 +411,53 @@ def grafico_boxplot_ativos(recorte: pd.DataFrame, resumo: pd.DataFrame):
     return fig
 
 
+def grafico_drawdown(recorte: pd.DataFrame, resumo: pd.DataFrame):
+    """
+    P4 - Área de drawdown ao longo do tempo (grade oficial, gráfico 4).
+    Um painel por ativo (small multiples): com 13 áreas sobrepostas o gráfico
+    ficaria ilegível. Painéis ordenados do MAIS resiliente para o MENOS resiliente,
+    com o mesmo eixo vertical para permitir comparação direta.
+    """
+    ordem = resumo.sort_values("drawdown_maximo", ascending=False)["codigo"].tolist()
+    dados_dd = recorte.assign(dd_pct=recorte["drawdown"] * 100)
+    colunas = min(4, len(ordem))
+    linhas = -(-len(ordem) // colunas)                       # divisão arredondada para cima
+    fig = px.area(
+        dados_dd, x="data", y="dd_pct", color="setor", facet_col="codigo",
+        facet_col_wrap=colunas, category_orders={"codigo": ordem},
+        color_discrete_map=CORES_SETOR, facet_row_spacing=0.09, facet_col_spacing=0.04,
+        labels={"data": "", "dd_pct": "Abaixo do topo (%)", "setor": "Setor", "codigo": ""},
+        title="Queda percentual a partir do topo · do mais resiliente para o menos resiliente",
+    )
+    fig.for_each_annotation(lambda a: a.update(text=f"<b>{a.text.split('=')[-1]}</b>"))
+    fig.update_traces(line=dict(width=1), hovertemplate="%{x|%d/%m/%Y}: %{y:.1f}%<extra></extra>")
+    fig.update_yaxes(range=[dados_dd["dd_pct"].min() * 1.08, 3], ticksuffix="%")
+    fig.update_xaxes(tickformat="%m/%y")
+    fig = estilo_padrao(fig, altura=170 * linhas + 170)
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+def grafico_ranking_drawdown(resumo: pd.DataFrame):
+    """Ranking do drawdown máximo: barras menores = ativo mais resiliente."""
+    dados_r = resumo.assign(dd_pct=resumo["drawdown_maximo"] * 100).sort_values("dd_pct")
+    fig = px.bar(
+        dados_r, x="dd_pct", y="codigo", color="setor", orientation="h",
+        color_discrete_map=CORES_SETOR,
+        text=dados_r["dd_pct"].map(lambda v: f"{v:.1f}%".replace(".", ",")),
+        labels={"dd_pct": "Drawdown máximo (%)", "codigo": "", "setor": "Setor"},
+        title="Ranking de resiliência: pior queda a partir do topo",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False,
+                      hovertemplate="%{y}: %{x:.1f}%<extra></extra>")
+    # ordem: mais resiliente (queda menor) no topo
+    fig.update_yaxes(categoryorder="array", categoryarray=dados_r["codigo"].tolist())
+    fig.update_xaxes(range=[dados_r["dd_pct"].min() * 1.25, 0], ticksuffix="%")
+    fig = estilo_padrao(fig, altura=max(320, 34 * len(dados_r) + 120))
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
 def reais(valor: float) -> str:
     """1234.5 -> 'R$ 1.234,50'"""
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -752,6 +799,69 @@ with aba_distribuicao:
                "período filtrado e mudam conforme o recorte; os 3 pregões sintéticos da fonte entram como "
                "retorno de 0%.")
 
-for aba in (aba_drawdown, aba_medias, aba_dados):
+with aba_drawdown:
+    st.markdown("##### P4 · Qual foi a maior queda de cada ativo a partir do seu topo, e quem foi mais resiliente?")
+    st.plotly_chart(grafico_drawdown(recorte, resumo), width="stretch")
+
+    # Situação no último dia do período: o ativo já tinha voltado ao topo?
+    final = (recorte.sort_values("data").groupby("codigo")
+             .agg(drawdown_final=("drawdown", "last")).reset_index())
+    tabela_dd = resumo.merge(final, on="codigo", how="left")
+    tabela_dd["situacao_final"] = tabela_dd["drawdown_final"].map(
+        lambda v: "No topo / recuperado" if v > -0.01 else "Abaixo do topo")
+
+    dd_acoes = tabela_dd[tabela_dd["codigo"] != CODIGO_BENCHMARK]
+    resiliente = dd_acoes.loc[dd_acoes["drawdown_maximo"].idxmax()]
+    profundo = dd_acoes.loc[dd_acoes["drawdown_maximo"].idxmin()]
+    recuperados = dd_acoes[dd_acoes["situacao_final"] == "No topo / recuperado"]["codigo"].tolist()
+    dd_ibov = resumo_ibov["drawdown_maximo"].iloc[0]
+    melhores_que_ibov = int((dd_acoes["drawdown_maximo"] > dd_ibov).sum())
+    texto_recuperados = (f"**{', '.join(recuperados)}** terminou(aram) o período no topo"
+                         if recuperados else "nenhum ativo filtrado terminou o período no seu topo")
+    if len(recuperados) > 1:
+        texto_recuperados = texto_recuperados.replace("terminou(aram)", "terminaram")
+    elif recuperados:
+        texto_recuperados = texto_recuperados.replace("terminou(aram)", "terminou")
+    if len(dd_acoes) == 1:
+        abertura = (f"**{resiliente['codigo']}** teve pior queda de **{pct(resiliente['drawdown_maximo'])}** "
+                    f"a partir do topo (fundo em {resiliente['data_drawdown_maximo']:%d/%m/%Y}). ")
+    else:
+        abertura = (f"o ativo mais resiliente foi **{resiliente['codigo']}**, cuja pior queda foi de "
+                    f"**{pct(resiliente['drawdown_maximo'])}** (fundo em {resiliente['data_drawdown_maximo']:%d/%m/%Y}). "
+                    f"A queda mais profunda foi de **{profundo['codigo']}**: **{pct(profundo['drawdown_maximo'])}** "
+                    f"(fundo em {profundo['data_drawdown_maximo']:%d/%m/%Y}). ")
+    st.markdown(
+        f"**Insight:** {abertura}O Ibovespa chegou a cair "
+        f"{pct(dd_ibov)} do topo, e **{melhores_que_ibov} de {len(dd_acoes)}** ativo(s) tiveram queda "
+        f"máxima menor que a dele. No último dia, {texto_recuperados}."
+    )
+
+    col_rank, col_tab = st.columns([1, 1])
+    with col_rank:
+        st.plotly_chart(grafico_ranking_drawdown(resumo), width="stretch")
+    with col_tab:
+        st.markdown("**Drawdown por ativo**")
+        st.dataframe(
+            tabela_dd.sort_values("drawdown_maximo", ascending=False)[
+                ["codigo", "setor", "drawdown_maximo", "data_drawdown_maximo", "drawdown_final", "situacao_final"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "codigo": "Ativo",
+                "setor": "Setor",
+                "drawdown_maximo": st.column_config.NumberColumn("Drawdown máximo", format="percent"),
+                "data_drawdown_maximo": st.column_config.DateColumn("Data do fundo", format="DD/MM/YYYY"),
+                "drawdown_final": st.column_config.NumberColumn(
+                    "Distância do topo no fim", format="percent",
+                    help="Quanto o ativo ainda estava abaixo do seu topo no último dia do período"),
+                "situacao_final": "Situação no fim",
+            },
+        )
+    st.caption("**Ação sugerida:** o drawdown mostra a \"dor máxima\" que um investidor teria enfrentado. "
+               "Para horizontes curtos ou baixa tolerância a perdas, priorizar ativos com quedas menores e "
+               "recuperação mais rápida. **Limitação:** o topo é contado a partir do 1º dia do período "
+               "filtrado; quedas anteriores a ele não aparecem.")
+
+for aba in (aba_medias, aba_dados):
     with aba:
         st.info("🚧 Aba em construção: será preenchida nos próximos cards.")
