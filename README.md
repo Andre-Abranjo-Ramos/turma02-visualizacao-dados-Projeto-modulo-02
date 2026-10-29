@@ -5,6 +5,7 @@
 
 [![App publicado](https://img.shields.io/badge/Streamlit-app%20publicado-FF4B4B?logo=streamlit&logoColor=white)](https://andre-performance-b3.streamlit.app/)
 [![Trello](https://img.shields.io/badge/Trello-quadro%20Kanban-0052CC?logo=trello&logoColor=white)](https://trello.com/b/95esWOEL/projetofinalt2)
+[![Vídeo](https://img.shields.io/badge/V%C3%ADdeo-apresenta%C3%A7%C3%A3o-34A853?logo=googledrive&logoColor=white)](https://drive.google.com/file/d/1BZ4PzNNOD9rQt9BAXtFuRCtWB6ry5Bm4/view)
 ![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/Supabase-PostgreSQL%2017-3ECF8E?logo=supabase&logoColor=white)
 
@@ -12,7 +13,7 @@
 |---|---|
 | **Aplicação em produção** | https://andre-performance-b3.streamlit.app/ |
 | **Quadro Kanban (Trello)** | https://trello.com/b/95esWOEL/projetofinalt2 |
-| **Vídeo de apresentação** | _link será adicionado após a publicação do vídeo_ |
+| **Vídeo de apresentação** (4min56s) | https://drive.google.com/file/d/1BZ4PzNNOD9rQt9BAXtFuRCtWB6ry5Bm4/view |
 
 ---
 
@@ -452,7 +453,7 @@ Colunas **Backlog → A Fazer → Em Andamento → Concluído**, com **um card p
 |---|---|
 | 🚀 Aplicação em produção | https://andre-performance-b3.streamlit.app/ |
 | 📋 Quadro Trello | https://trello.com/b/95esWOEL/projetofinalt2 |
-| 🎬 Vídeo de apresentação | _link será adicionado após a publicação do vídeo_ |
+| 🎬 Vídeo de apresentação | https://drive.google.com/file/d/1BZ4PzNNOD9rQt9BAXtFuRCtWB6ry5Bm4/view |
 | 💻 Repositório | https://github.com/Andre-Abranjo-Ramos/turma02-visualizacao-dados-Projeto-modulo-02 |
 
 ---
